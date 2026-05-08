@@ -79,9 +79,11 @@ pipeline_build() {
 }
 
 # pipeline_write_drainer OUTPUT_DIR
-# Emits $DRAINER — a per-event drainer script that fetches up to 1000
-# events per /head call and persists each as a separate <ts>-<seq>.json
-# file. Same pattern as test_subscribe_pipeline.sh's inline drainer.
+# Emits $DRAINER — a JSONL-appending drainer script. Per wake-up:
+# opens events.jsonl once via FD 3 (no per-line open/close), then
+# loops /head + write + /delete_up_to until _events is empty. All
+# events from this scopecache run land as one line each in
+# OUTPUT_DIR/events.jsonl.
 pipeline_write_drainer() {
     output_dir="$1"
     cat > "$DRAINER" <<DRAINER_EOF
@@ -92,21 +94,19 @@ SCOPE="\${SCOPECACHE_SCOPE:-_events}"
 SOCK="\${SCOPECACHE_SOCKET_PATH:-/run/scopecache.sock}"
 DIR="\${SCOPECACHE_OUTPUT_DIR:-${output_dir}}"
 mkdir -p "\$DIR"
+exec 3>>"\${DIR}/events.jsonl"
 while :; do
     response=\$(curl -fsS --unix-socket "\$SOCK" "http://localhost/head?scope=\${SCOPE}&limit=1000")
     count=\$(printf '%s' "\$response" | jq -r '.count // 0')
     if [ "\$count" = "0" ]; then break; fi
-    printf '%s' "\$response" | jq -c '.items[]' | while IFS= read -r line; do
-        ts=\$(printf '%s' "\$line"  | jq -r '.ts')
-        seq=\$(printf '%s' "\$line" | jq -r '.seq')
-        printf '%s\n' "\$line" > "\${DIR}/\${ts}-\${seq}.json"
-    done
+    printf '%s' "\$response" | jq -c '.items[]' >&3
     last_seq=\$(printf '%s' "\$response" | jq -r '.items[-1].seq')
     curl -fsS --unix-socket "\$SOCK" -X POST \\
         -H "Content-Type: application/json" \\
         -d "{\\"scope\\":\\"\${SCOPE}\\",\\"max_seq\\":\${last_seq}}" \\
         "http://localhost/delete_up_to" > /dev/null
 done
+exec 3>&-
 DRAINER_EOF
     chmod +x "$DRAINER"
 }

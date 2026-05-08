@@ -2960,24 +2960,24 @@ func TestEvents_AutoPopulate_Notify(t *testing.T) {
 		t.Fatalf("Notify mode: _events count=%d want 3", count)
 	}
 	for i, evt := range items {
-		evtPayload, ok := evt["payload"].(map[string]interface{})
+		envelope, ok := evt["event"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("event %d: payload not an object: %v", i, evt["payload"])
+			t.Fatalf("event %d: envelope not an object: %v", i, evt["event"])
 		}
-		if evtPayload["op"] != "append" {
-			t.Errorf("event %d: op=%v want append", i, evtPayload["op"])
+		if envelope["op"] != "append" {
+			t.Errorf("event %d: op=%v want append", i, envelope["op"])
 		}
-		if evtPayload["scope"] != "posts" {
-			t.Errorf("event %d: scope=%v want posts", i, evtPayload["scope"])
+		if envelope["scope"] != "posts" {
+			t.Errorf("event %d: scope=%v want posts", i, envelope["scope"])
 		}
-		if _, hasUserPayload := evtPayload["data"]; hasUserPayload {
-			t.Errorf("event %d: Notify mode must omit user payload (.data), got %v", i, evtPayload)
+		if _, hasUserPayload := envelope["payload"]; hasUserPayload {
+			t.Errorf("event %d: Notify mode must omit user payload, got %v", i, envelope)
 		}
 		// id and seq must be carried in the event envelope.
-		if evtPayload["id"] == nil {
+		if envelope["id"] == nil {
 			t.Errorf("event %d: id missing", i)
 		}
-		if evtPayload["seq"] == nil {
+		if envelope["seq"] == nil {
 			t.Errorf("event %d: seq missing", i)
 		}
 	}
@@ -2988,10 +2988,11 @@ func TestEvents_AutoPopulate_Notify(t *testing.T) {
 }
 
 // EventsModeFull adds the user payload to the event envelope. The
-// writeEvent JSON object is what /tail returns under "payload";
-// inside it, the "data" field (CloudEvents convention) carries the
-// original user-write payload. Two levels of "payload" on the wire
-// would be confusing, hence the dedicated key.
+// writeEvent JSON object is what /tail returns under "event" (the
+// _events-specific outer key, see Item.MarshalJSON); inside it, the
+// "payload" field carries the original user-write payload — same
+// key name and same meaning as on every other endpoint. One word,
+// one concept across nesting levels.
 func TestEvents_AutoPopulate_Full(t *testing.T) {
 	h, _ := newReservedScopesTestHandler(t, Config{
 		ScopeMaxItems: 100,
@@ -3009,13 +3010,13 @@ func TestEvents_AutoPopulate_Full(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("Full mode: _events count=%d want 1", count)
 	}
-	evtPayload, ok := items[0]["payload"].(map[string]interface{})
+	envelope, ok := items[0]["event"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("event payload not an object: %v", items[0]["payload"])
+		t.Fatalf("event envelope not an object: %v", items[0]["event"])
 	}
-	userPayload, ok := evtPayload["data"].(map[string]interface{})
+	userPayload, ok := envelope["payload"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("Full mode must include user payload under .data, got %v", evtPayload)
+		t.Fatalf("Full mode must include user payload under .payload, got %v", envelope)
 	}
 	if userPayload["title"] != "Hi" {
 		t.Errorf("user payload title=%v want Hi", userPayload["title"])
@@ -3077,9 +3078,9 @@ func TestEvents_AutoPopulate_Full_Many(t *testing.T) {
 		if !ok {
 			t.Fatalf("event %d: not an object: %v", i, ri)
 		}
-		evt, ok := envItem["payload"].(map[string]interface{})
+		evt, ok := envItem["event"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("event %d: envelope payload not an object: %v", i, envItem["payload"])
+			t.Fatalf("event %d: envelope not an object: %v", i, envItem["event"])
 		}
 		if evt["op"] != "append" {
 			t.Errorf("event %d: op=%v want append", i, evt["op"])
@@ -3095,9 +3096,9 @@ func TestEvents_AutoPopulate_Full_Many(t *testing.T) {
 		if !ok || seq != float64(i+1) {
 			t.Errorf("event %d: seq=%v want %d", i, evt["seq"], i+1)
 		}
-		userPayload, ok := evt["data"].(map[string]interface{})
+		userPayload, ok := evt["payload"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("event %d: nested user payload not under .data: %v", i, evt["data"])
+			t.Fatalf("event %d: nested user payload not under .payload: %v", i, evt["payload"])
 		}
 		if userPayload["n"] != float64(i) {
 			t.Errorf("event %d: user payload n=%v want %d", i, userPayload["n"], i)
@@ -3162,15 +3163,15 @@ func TestEvents_AutoPopulate_FullModeNoDropOnLargeInboxWrite(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("_events count=%d want 1 (large _inbox write must produce its event in Full mode)", count)
 	}
-	evtPayload, ok := items[0]["payload"].(map[string]interface{})
+	envelope, ok := items[0]["event"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("event[0].payload not an object: %v", items[0]["payload"])
+		t.Fatalf("event[0].event not an object: %v", items[0]["event"])
 	}
-	if evtScope, _ := evtPayload["scope"].(string); evtScope != "_inbox" {
+	if evtScope, _ := envelope["scope"].(string); evtScope != "_inbox" {
 		t.Errorf("event scope=%q want _inbox", evtScope)
 	}
-	if evtUserPayload, _ := evtPayload["data"].(string); len(evtUserPayload) != len(bigPayload) {
-		t.Errorf("event nested payload length=%d want %d (must carry the original payload bytes verbatim under .data)",
+	if evtUserPayload, _ := envelope["payload"].(string); len(evtUserPayload) != len(bigPayload) {
+		t.Errorf("event nested payload length=%d want %d (must carry the original payload bytes verbatim under .payload)",
 			len(evtUserPayload), len(bigPayload))
 	}
 }
@@ -3301,7 +3302,7 @@ func TestEvents_AutoPopulate_DropsOnOverflow(t *testing.T) {
 }
 
 // /upsert auto-populate: same envelope shape as /append (scope, id,
-// seq, ts, event?) — only the op string differs. Test covers both
+// seq, ts, payload?) — only the op string differs. Test covers both
 // the create branch (fresh id) and the replace branch (existing id);
 // drainers should see "upsert" in both cases (action-logging: the
 // action is "upsert this id with this payload" regardless of outcome).
@@ -3329,9 +3330,9 @@ func TestEvents_AutoPopulate_Upsert(t *testing.T) {
 		t.Fatalf("upsert auto-populate: _events count=%d want 2", count)
 	}
 	for i, evt := range items {
-		envelope, ok := evt["payload"].(map[string]interface{})
+		envelope, ok := evt["event"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("event %d: envelope payload not an object: %v", i, evt["payload"])
+			t.Fatalf("event %d: envelope not an object: %v", i, evt["event"])
 		}
 		if envelope["op"] != "upsert" {
 			t.Errorf("event %d: op=%v want upsert", i, envelope["op"])
@@ -3339,10 +3340,10 @@ func TestEvents_AutoPopulate_Upsert(t *testing.T) {
 		if envelope["scope"] != "posts" || envelope["id"] != "a" {
 			t.Errorf("event %d: addressing wrong, got scope=%v id=%v", i, envelope["scope"], envelope["id"])
 		}
-		// Both events carry the user payload under .data (Full mode).
-		userPayload, ok := envelope["data"].(map[string]interface{})
+		// Both events carry the user payload under .payload (Full mode).
+		userPayload, ok := envelope["payload"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("event %d: nested user payload not under .data: %v", i, envelope["data"])
+			t.Fatalf("event %d: nested user payload not under .payload: %v", i, envelope["payload"])
 		}
 		if userPayload["v"] != float64(i+1) { // 1, then 2
 			t.Errorf("event %d: user payload v=%v want %d", i, userPayload["v"], i+1)
@@ -3367,12 +3368,12 @@ func TestEvents_AutoPopulate_Upsert_Notify(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("Notify mode: _events count=%d want 1", count)
 	}
-	envelope, _ := items[0]["payload"].(map[string]interface{})
+	envelope, _ := items[0]["event"].(map[string]interface{})
 	if envelope["op"] != "upsert" {
 		t.Errorf("op=%v want upsert", envelope["op"])
 	}
-	if _, hasPayload := envelope["data"]; hasPayload {
-		t.Errorf("Notify mode must strip user payload (.data), got %v", envelope)
+	if _, hasPayload := envelope["payload"]; hasPayload {
+		t.Errorf("Notify mode must strip user payload, got %v", envelope)
 	}
 }
 
@@ -3427,14 +3428,14 @@ func TestEvents_AutoPopulate_Update(t *testing.T) {
 	}
 
 	// items[2] is the by-id update; items[3] is the by-seq update.
-	byID, _ := items[2]["payload"].(map[string]interface{})
+	byID, _ := items[2]["event"].(map[string]interface{})
 	if byID["op"] != "update" || byID["id"] != "a" {
 		t.Errorf("by-id update envelope wrong: %v", byID)
 	}
 	if _, hasSeq := byID["seq"]; hasSeq {
 		t.Errorf("by-id update envelope must omit seq (omitempty); got %v", byID["seq"])
 	}
-	bySeq, _ := items[3]["payload"].(map[string]interface{})
+	bySeq, _ := items[3]["event"].(map[string]interface{})
 	if bySeq["op"] != "update" {
 		t.Errorf("by-seq update op=%v want update", bySeq["op"])
 	}
@@ -3476,9 +3477,9 @@ func TestEvents_AutoPopulate_CounterAdd(t *testing.T) {
 	}
 	wantBy := []float64{5, -2}
 	for i, evt := range items {
-		envelope, ok := evt["payload"].(map[string]interface{})
+		envelope, ok := evt["event"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("event %d: envelope not object: %v", i, evt["payload"])
+			t.Fatalf("event %d: envelope not object: %v", i, evt["event"])
 		}
 		if envelope["op"] != "counter_add" {
 			t.Errorf("event %d: op=%v want counter_add", i, envelope["op"])
@@ -3490,10 +3491,10 @@ func TestEvents_AutoPopulate_CounterAdd(t *testing.T) {
 		if !ok || by != wantBy[i] {
 			t.Errorf("event %d: by=%v want %v (action-input, not the post-add value)", i, envelope["by"], wantBy[i])
 		}
-		// Counter envelopes carry no event field (counter cells are
+		// Counter envelopes carry no payload field (counter cells are
 		// typed int64, not opaque JSON).
-		if _, hasData := envelope["data"]; hasData {
-			t.Errorf("event %d: counter_add must not carry .data, got %v", i, envelope["data"])
+		if _, hasPayload := envelope["payload"]; hasPayload {
+			t.Errorf("event %d: counter_add must not carry .payload, got %v", i, envelope["payload"])
 		}
 		// And NO seq — counterAddOne doesn't pass it through.
 		if _, hasSeq := envelope["seq"]; hasSeq {
@@ -3549,7 +3550,7 @@ func TestEvents_AutoPopulate_Delete(t *testing.T) {
 		t.Fatalf("after deletes: _events count=%d want 4 (2 seeds + 2 deletes, miss must not emit)", count)
 	}
 
-	byID, _ := items[2]["payload"].(map[string]interface{})
+	byID, _ := items[2]["event"].(map[string]interface{})
 	if byID["op"] != "delete" || byID["id"] != "a" {
 		t.Errorf("by-id delete envelope wrong: %v", byID)
 	}
@@ -3559,7 +3560,7 @@ func TestEvents_AutoPopulate_Delete(t *testing.T) {
 	if _, hasPayload := byID["payload"]; hasPayload {
 		t.Errorf("delete envelope must not carry payload; got %v", byID["payload"])
 	}
-	bySeq, _ := items[3]["payload"].(map[string]interface{})
+	bySeq, _ := items[3]["event"].(map[string]interface{})
 	if bySeq["op"] != "delete" {
 		t.Errorf("by-seq delete op=%v want delete", bySeq["op"])
 	}
@@ -3634,10 +3635,10 @@ func TestEvents_AutoPopulate_HighVolume_AppendThenDelete(t *testing.T) {
 
 	// First N events are the appends (commit-order: append 0..N-1).
 	for i := 0; i < N; i++ {
-		envelope, _ := rawItems[i].(map[string]interface{})
-		evt, ok := envelope["payload"].(map[string]interface{})
+		envItem, _ := rawItems[i].(map[string]interface{})
+		evt, ok := envItem["event"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("append event %d: envelope payload not object: %v", i, envelope["payload"])
+			t.Fatalf("append event %d: envelope not object: %v", i, envItem["event"])
 		}
 		if evt["op"] != "append" {
 			t.Fatalf("event %d: op=%v want append at this position", i, evt["op"])
@@ -3651,10 +3652,10 @@ func TestEvents_AutoPopulate_HighVolume_AppendThenDelete(t *testing.T) {
 	// Next N events are the deletes, in delete-order (which matches
 	// append-order in this test: we delete p-0 through p-N-1).
 	for i := 0; i < N; i++ {
-		envelope, _ := rawItems[N+i].(map[string]interface{})
-		evt, ok := envelope["payload"].(map[string]interface{})
+		envItem, _ := rawItems[N+i].(map[string]interface{})
+		evt, ok := envItem["event"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("delete event %d: envelope payload not object: %v", N+i, envelope["payload"])
+			t.Fatalf("delete event %d: envelope not object: %v", N+i, envItem["event"])
 		}
 		if evt["op"] != "delete" {
 			t.Fatalf("event %d: op=%v want delete at this position", N+i, evt["op"])
@@ -3663,11 +3664,11 @@ func TestEvents_AutoPopulate_HighVolume_AppendThenDelete(t *testing.T) {
 		if evt["id"] != wantID {
 			t.Fatalf("delete event %d: id=%v want %s", N+i, evt["id"], wantID)
 		}
-		// Delete events must not carry .data (and we asserted the
+		// Delete events must not carry .payload (and we asserted the
 		// shape in the per-op tests above, but verify it survives
 		// volume too).
-		if _, hasData := evt["data"]; hasData {
-			t.Fatalf("delete event %d carries .data (violates op shape): %v", N+i, evt["data"])
+		if _, hasPayload := evt["payload"]; hasPayload {
+			t.Fatalf("delete event %d carries .payload (violates op shape): %v", N+i, evt["payload"])
 		}
 	}
 }
@@ -3698,9 +3699,9 @@ func TestEvents_AutoPopulate_Warm(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("warm auto-populate: _events count=%d want 1", count)
 	}
-	envelope, ok := items[0]["payload"].(map[string]interface{})
+	envelope, ok := items[0]["event"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("envelope payload not an object: %v", items[0]["payload"])
+		t.Fatalf("envelope not an object: %v", items[0]["event"])
 	}
 	if envelope["op"] != "warm" {
 		t.Errorf("op=%v want warm", envelope["op"])
@@ -3714,8 +3715,8 @@ func TestEvents_AutoPopulate_Warm(t *testing.T) {
 	if _, hasSeq := envelope["seq"]; hasSeq {
 		t.Errorf("warm envelope must not carry seq; got %v", envelope["seq"])
 	}
-	if _, hasData := envelope["data"]; hasData {
-		t.Errorf("warm envelope must not carry .data; got %v", envelope["data"])
+	if _, hasPayload := envelope["payload"]; hasPayload {
+		t.Errorf("warm envelope must not carry .payload; got %v", envelope["payload"])
 	}
 	if ts, ok := envelope["ts"].(float64); !ok || ts <= 0 {
 		t.Errorf("warm envelope must carry positive ts; got %v", envelope["ts"])
@@ -3792,7 +3793,7 @@ func TestEvents_AutoPopulate_DeleteScope(t *testing.T) {
 		t.Fatalf("after delete_scope: _events count=%d want 2 (1 seed + 1 hit, miss must not emit)", count)
 	}
 
-	envelope, _ := items[1]["payload"].(map[string]interface{})
+	envelope, _ := items[1]["event"].(map[string]interface{})
 	if envelope["op"] != "delete_scope" {
 		t.Errorf("op=%v want delete_scope", envelope["op"])
 	}
@@ -3805,8 +3806,8 @@ func TestEvents_AutoPopulate_DeleteScope(t *testing.T) {
 	if _, hasID := envelope["id"]; hasID {
 		t.Errorf("delete_scope envelope must not carry id; got %v", envelope["id"])
 	}
-	if _, hasData := envelope["data"]; hasData {
-		t.Errorf("delete_scope envelope must not carry .data; got %v", envelope["data"])
+	if _, hasPayload := envelope["payload"]; hasPayload {
+		t.Errorf("delete_scope envelope must not carry .payload; got %v", envelope["payload"])
 	}
 
 	// Post-state: the deleted scope's items must actually be gone.
@@ -3970,7 +3971,7 @@ func TestEvents_AutoPopulate_DeleteUpTo(t *testing.T) {
 		t.Fatalf("after delete_up_to: _events count=%d want 6 (5 seeds + 1 hit, no-op skipped)", count)
 	}
 
-	envelope, _ := items[5]["payload"].(map[string]interface{})
+	envelope, _ := items[5]["event"].(map[string]interface{})
 	if envelope["op"] != "delete_up_to" {
 		t.Errorf("op=%v want delete_up_to", envelope["op"])
 	}
@@ -3986,8 +3987,8 @@ func TestEvents_AutoPopulate_DeleteUpTo(t *testing.T) {
 	if _, hasSeq := envelope["seq"]; hasSeq {
 		t.Errorf("delete_up_to envelope must omit seq (per-item seq is not in scope), got %v", envelope["seq"])
 	}
-	if _, hasData := envelope["data"]; hasData {
-		t.Errorf("delete_up_to envelope must not carry .data, got %v", envelope["data"])
+	if _, hasPayload := envelope["payload"]; hasPayload {
+		t.Errorf("delete_up_to envelope must not carry .payload, got %v", envelope["payload"])
 	}
 }
 

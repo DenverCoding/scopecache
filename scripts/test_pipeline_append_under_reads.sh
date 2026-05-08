@@ -56,6 +56,7 @@ pipeline_setup "$REPO_ROOT"
 pipeline_install_trap
 
 OUTPUT_DIR="$WORK/messages"
+JSONL="$OUTPUT_DIR/events.jsonl"
 WRK_OUTPUT="$WORK/wrk.txt"
 WRK_LUA="$WORK/get-seq.lua"
 mkdir -p "$OUTPUT_DIR"
@@ -82,13 +83,13 @@ echo "ok   $SEED_COUNT items seeded into $READS_SCOPE"
 
 # /warm emits one {op:"warm", ts} envelope into _events; the drainer
 # wakes, persists it, and clears _events. Wait for that to happen,
-# then wipe the messages dir so the producer's events are the only
-# files counted in assertions. Bridge isn't up yet so wrk-side load
+# then truncate the JSONL so the producer's events are the only
+# lines counted in assertions. Bridge isn't up yet so wrk-side load
 # can't interfere here.
-echo "== drain seed-event + reset output dir =="
+echo "== drain seed-event + reset jsonl =="
 pipeline_wait_drain "_events" 10
-rm -f "$OUTPUT_DIR"/*.json
-echo "ok   _events drained, $OUTPUT_DIR cleared"
+: > "$JSONL"
+echo "ok   _events drained, $JSONL truncated"
 
 echo "== start tcp bridge on :$BRIDGE_PORT =="
 pipeline_start_bridge
@@ -130,19 +131,19 @@ echo "ok   _events drained from cache"
 
 echo ""
 echo "== assertions =="
-file_count=$(find "$OUTPUT_DIR" -name '*.json' -type f | wc -l | tr -d ' ')
-if [ "$file_count" -ne "$COUNT" ]; then
-    echo "FAIL: expected $COUNT files in $OUTPUT_DIR, got $file_count"
+line_count=$(wc -l < "$JSONL" | tr -d ' ')
+if [ "$line_count" -ne "$COUNT" ]; then
+    echo "FAIL: expected $COUNT lines in $JSONL, got $line_count"
     exit 1
 fi
-echo "ok   $file_count files persisted (one per message)"
+echo "ok   $line_count lines in $JSONL (one per message)"
 
-unique_counters=$(cat "$OUTPUT_DIR"/*.json | jq -r '.payload.data.n' | sort -n | uniq | wc -l | tr -d ' ')
+unique_counters=$(jq -r '.event.payload.n' < "$JSONL" | sort -n | uniq | wc -l | tr -d ' ')
 if [ "$unique_counters" -ne "$COUNT" ]; then
-    echo "FAIL: expected $COUNT unique counter values in files, got $unique_counters"
+    echo "FAIL: expected $COUNT unique counter values in jsonl, got $unique_counters"
     exit 1
 fi
-echo "ok   counter values 1..$COUNT each appear exactly once in files"
+echo "ok   counter values 1..$COUNT each appear exactly once in jsonl"
 
 cache_response=$(curl -fsS --unix-socket "$SOCK" \
     "http://localhost/head?scope=${WRITE_SCOPE}&limit=${COUNT}")
@@ -161,29 +162,29 @@ fi
 echo "ok   counter values 1..$COUNT each appear exactly once in cache"
 
 cache_seqs=$(printf '%s' "$cache_response" | jq -r '.items[].seq' | sort -n | tr '\n' ',')
-file_seqs=$(cat "$OUTPUT_DIR"/*.json | jq -r '.payload.seq' | sort -n | tr '\n' ',')
+file_seqs=$(jq -r '.event.seq' < "$JSONL" | sort -n | tr '\n' ',')
 if [ "$cache_seqs" != "$file_seqs" ]; then
-    echo "FAIL: cache seqs do not match file seqs"
+    echo "FAIL: cache seqs do not match jsonl seqs"
     exit 1
 fi
-echo "ok   cache seqs match file seqs (same events on both sides)"
+echo "ok   cache seqs match jsonl seqs (same events on both sides)"
 
 cache_seq_ts=$(printf '%s' "$cache_response" | jq -r '.items[] | "\(.seq):\(.ts)"' | sort -n | tr '\n' ',')
-file_seq_ts=$(cat "$OUTPUT_DIR"/*.json | jq -r '.payload | "\(.seq):\(.ts)"' | sort -n | tr '\n' ',')
+file_seq_ts=$(jq -r '.event | "\(.seq):\(.ts)"' < "$JSONL" | sort -n | tr '\n' ',')
 if [ "$cache_seq_ts" != "$file_seq_ts" ]; then
-    echo "FAIL: cache (seq,ts) pairs do not match file (seq,payload.ts) pairs"
+    echo "FAIL: cache (seq,ts) pairs do not match jsonl (event.seq,event.ts) pairs"
     exit 1
 fi
-echo "ok   cache (seq,ts) pairs match file (seq,payload.ts) pairs"
+echo "ok   cache (seq,ts) pairs match jsonl (event.seq,event.ts) pairs"
 
 echo ""
 echo "== summary =="
 echo "PASS — pipeline survived $COUNT appends + concurrent get-seq reads."
 echo ""
-echo "Foreground: $COUNT files in $OUTPUT_DIR (${total}s producer)"
+echo "Foreground: $COUNT lines in $JSONL (${total}s producer)"
 echo "Background: $WRK_THREADS-thread × $WRK_CONNS-conn × $WRK_DURATION wrk reads on $READS_SCOPE"
 echo ""
 echo "wrk results:"
 grep -E "Requests/sec|Latency *[0-9]|Socket errors|Non-2xx|BADSTATUS" "$WRK_OUTPUT" | sed 's/^/  /' || true
 echo ""
-echo "Files left in place for inspection. Re-run wipes them."
+echo "JSONL left in place for inspection. Re-run wipes it."

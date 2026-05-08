@@ -178,10 +178,11 @@ fi
 echo "ok   $file_count files persisted (one per message)"
 
 # Counter values 1..COUNT must each appear exactly once across all
-# files. Reads .payload.data.n: the outer payload is the _events
-# envelope (the writeEvent JSON), the nested .data is the original
-# /append payload that travels with EventsModeFull.
-unique_counters=$(cat "$OUTPUT_DIR"/*.json | jq -r '.payload.data.n' | sort -n | uniq | wc -l | tr -d ' ')
+# files. Reads .event.payload.n: outer .event is the _events item's
+# writeEvent envelope (Item.MarshalJSON renames Item.payload→event
+# for the _events scope); inner .payload is the original /append
+# payload mirrored when Events.Mode=full.
+unique_counters=$(cat "$OUTPUT_DIR"/*.json | jq -r '.event.payload.n' | sort -n | uniq | wc -l | tr -d ' ')
 if [ "$unique_counters" -ne "$COUNT" ]; then
     echo "FAIL: expected $COUNT unique counter values, got $unique_counters"
     exit 1
@@ -210,7 +211,7 @@ echo "ok   counter values 1..$COUNT each appear exactly once in cache"
 
 # Cross-check: the seq stamps in cache must match those in the files.
 cache_seqs=$(printf '%s' "$cache_response" | jq -r '.items[].seq' | sort -n | tr '\n' ',')
-file_seqs=$(cat "$OUTPUT_DIR"/*.json | jq -r '.payload.seq' | sort -n | tr '\n' ',')
+file_seqs=$(cat "$OUTPUT_DIR"/*.json | jq -r '.event.seq' | sort -n | tr '\n' ',')
 if [ "$cache_seqs" != "$file_seqs" ]; then
     echo "FAIL: cache seqs do not match file seqs"
     exit 1
@@ -218,18 +219,18 @@ fi
 echo "ok   cache seqs match file seqs (same events on both sides)"
 
 # ts cross-check: each (seq, ts) pair in the cache scope must match
-# the (seq, payload.ts) pair recorded in the events envelope. The
-# envelope's payload mirrors the original /append item, so payload.ts
-# is the counter-scope ts at write-time. The outer .ts in the file
-# is the _events scope's own ts (envelope-write time, stamped a few
-# µs later) — different by design, not compared here.
+# the (event.seq, event.ts) pair recorded in the writeEvent envelope.
+# The envelope mirrors the original /append item, so event.ts is the
+# counter-scope ts at write-time. The outer .ts in the file is the
+# _events scope's own ts (envelope-write time, stamped a few µs
+# later) — different by design, not compared here.
 cache_seq_ts=$(printf '%s' "$cache_response" | jq -r '.items[] | "\(.seq):\(.ts)"' | sort -n | tr '\n' ',')
-file_seq_ts=$(cat "$OUTPUT_DIR"/*.json | jq -r '.payload | "\(.seq):\(.ts)"' | sort -n | tr '\n' ',')
+file_seq_ts=$(cat "$OUTPUT_DIR"/*.json | jq -r '.event | "\(.seq):\(.ts)"' | sort -n | tr '\n' ',')
 if [ "$cache_seq_ts" != "$file_seq_ts" ]; then
-    echo "FAIL: cache (seq,ts) pairs do not match file (seq,payload.ts) pairs"
+    echo "FAIL: cache (seq,ts) pairs do not match file (event.seq,event.ts) pairs"
     exit 1
 fi
-echo "ok   cache (seq,ts) pairs match file (seq,payload.ts) pairs"
+echo "ok   cache (seq,ts) pairs match file (event.seq,event.ts) pairs"
 
 echo ""
 echo "== summary =="

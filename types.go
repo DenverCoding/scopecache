@@ -281,7 +281,7 @@ type Item struct {
 	ID      string          `json:"id,omitempty"`
 	Seq     uint64          `json:"seq,omitempty"`
 	Ts      int64           `json:"ts"`
-	Payload json.RawMessage `json:"payload"`
+	Payload json.RawMessage `json:"payload"` // see MarshalJSON: serialised as `event` for _events items
 
 	// renderBytes is the JSON-string-decoded form of Payload, set at
 	// write-time for payloads whose first non-whitespace byte is `"`,
@@ -305,6 +305,40 @@ type Item struct {
 	// the cell give us lock-free increment + CAS-max ts under RLock;
 	// Payload bytes are only ever produced fresh on the read boundary.
 	counter *counterCell
+}
+
+// MarshalJSON keeps the universal Item shape (scope/id/seq/ts +
+// payload-bearing field) but renames the payload-bearing key to
+// `event` when the item lives in the reserved `_events` scope. The
+// stored bytes there are a writeEvent envelope (see events.go), not
+// a user-supplied payload — calling that field `payload` would put
+// the same word at two nesting levels with two different meanings
+// (outer = envelope, inner = client-content). Renaming the outer
+// key removes the ambiguity: `payload` always means "the bytes the
+// client originally stored", at every level it appears.
+//
+// Implementation note: emitting via two struct literals (one per
+// scope) keeps the generated JSON well-defined. encoding/json's
+// reflection path produces consistent field-order matching the
+// struct declaration, so /tail _events output remains stable across
+// Go versions.
+func (i Item) MarshalJSON() ([]byte, error) {
+	if i.Scope == EventsScopeName {
+		return json.Marshal(struct {
+			Scope string          `json:"scope,omitempty"`
+			ID    string          `json:"id,omitempty"`
+			Seq   uint64          `json:"seq,omitempty"`
+			Ts    int64           `json:"ts"`
+			Event json.RawMessage `json:"event"`
+		}{i.Scope, i.ID, i.Seq, i.Ts, i.Payload})
+	}
+	return json.Marshal(struct {
+		Scope   string          `json:"scope,omitempty"`
+		ID      string          `json:"id,omitempty"`
+		Seq     uint64          `json:"seq,omitempty"`
+		Ts      int64           `json:"ts"`
+		Payload json.RawMessage `json:"payload"`
+	}{i.Scope, i.ID, i.Seq, i.Ts, i.Payload})
 }
 
 // counterCell is the lock-free state for a counter item. value is

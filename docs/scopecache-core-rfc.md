@@ -410,17 +410,43 @@ successful mutation, and how much each entry contains:
 |---|---|
 | `off` *(default)* | Auto-populate disabled; zero overhead on the write path. Operators opt in when a drainer is ready to consume. |
 | `notify` | Each committed mutation produces an event with addressing only — `{op, scope, id?, seq, ts}`. Sufficient for drainers that re-fetch from cache state on wake-up. |
-| `full` | Each committed mutation produces an event with the user-write payload included under a `data` field — `{op, scope, id?, seq, ts, data}`. Sufficient for drainers replicating state without re-querying. |
+| `full` | Each committed mutation produces an event with the user-write payload included — `{op, scope, id?, seq, ts, payload}`. Sufficient for drainers replicating state without re-querying. |
 
-The carried payload rides under the JSON key `data` (CloudEvents
-convention) rather than `payload`, so a `/tail _events` response
-does not surface "payload" at two nesting levels — the outer
-`payload` field is the cache's generic `Item.Payload` (the
-writeEvent JSON itself), the inner `data` is the original
-user-write content.
+`_events` items are special-marshaled on the wire: the cache's
+generic `Item.payload` field is renamed to `event` for items in the
+`_events` scope (see `Item.MarshalJSON`), and inside the writeEvent
+the user-write content travels under `payload` — same key name and
+same meaning as on every other endpoint. One word, one concept at
+every level.
+
+For a user `/append` of `{"n":1}` on scope `counter` with
+`Events.Mode = full`, the resulting `_events` entry on the wire is:
+
+```json
+{
+  "scope": "_events",
+  "seq": 2,
+  "ts": 1700000000123456,
+  "event": {
+    "op": "append",
+    "scope": "counter",
+    "id": "msg-1",
+    "seq": 1,
+    "ts": 1700000000123440,
+    "payload": {"n": 1}
+  }
+}
+```
+
+Drainers reading `/tail` or `/head` against `_events` parse
+`items[i].event` to get the writeEvent envelope; they parse
+`items[i].event.payload` to get the original client bytes when
+`Events.Mode = full`. Reading any other scope (`/get`, `/head`,
+`/tail` on user scopes) returns the standard `payload` field —
+`event` is the only scope-specific rename the cache performs.
 
 The action-vector — `op`, addressing fields (`scope`, `id?`,
-`seq?`), and `data?` — captures the inputs the caller sent, not
+`seq?`), and `payload?` — captures the inputs the caller sent, not
 the result the cache computed. `/counter_add` events carry `by`
 (the increment), not the new value; `/delete_up_to` events carry
 `max_seq`, not the deleted-count. This makes the event stream
