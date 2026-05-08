@@ -1921,11 +1921,13 @@ consumer reach the cache through.
 
 ### 7.1 What `*Gateway` is
 
-`*scopecache.Gateway` is the **only** Go entry point into the
-cache. The underlying `*store` and its lowercase methods are
-unreachable from outside `package scopecache`; every external
-caller — adapter, addon, test — holds a `*Gateway` and calls its
-methods.
+`*scopecache.Gateway` is the public surface for **in-process Go
+callers** — adapters, addons, embedded consumers, tests. Its
+HTTP-side counterpart is `*API` (§5). Both types are publicly
+exported; everything beneath them is not. The underlying `*store`
+and its lowercase methods are unreachable from outside `package
+scopecache`, so external code always reaches the cache via
+exactly one of these two entry types.
 
 ```
             HTTP world                      Go world
@@ -1936,17 +1938,28 @@ methods.
                           (internal)
 ```
 
-Two paths into the same store, with different responsibilities:
+Both entry types delegate into `*store`. Validation runs at the
+`*store` method top, so shape rules (scope/id/payload limits)
+apply identically regardless of which entry was used — a Go
+caller cannot bypass them by skipping HTTP, and an HTTP caller
+cannot bypass them by skipping Go.
 
-- HTTP requests enter through `*API`. `NewAPI(gw, …)` extracts
-  `gw.store` once at construction and dispatches every handler
-  directly through `*store`. Gateway is bypassed; the request
-  body is already detached from the wire by
-  `json.RawMessage.UnmarshalJSON`.
-- Go callers enter through `*Gateway`. Every data-plane method
-  validates and clones (§7.3) before delegating to `*store`.
-  Validation lives at the `*store` method top so callers cannot
-  bypass shape rules by entering via Go instead of HTTP.
+The two paths differ only in the boundary work they do before
+delegating:
+
+- `*API` (HTTP) does no defensive cloning. The JSON decoder has
+  already allocated fresh bytes for the request body, detaching
+  them from any shared wire buffer. `NewAPI(gw, …)` extracts
+  `gw.store` once at construction and dispatches handlers
+  directly through `*store`; Gateway is not on the request path.
+- `*Gateway` (Go) clones payload bytes on the way in and on the
+  way out (§7.3) before delegating to `*store`. Without that, a
+  Go caller mutating its slice after a write — a hazard the HTTP
+  world cannot reproduce — would corrupt the cached item.
+
+So Gateway is not "the funnel every request flows through"; it
+is the Go-shaped twin of `*API`, with one extra job (cloning)
+that the HTTP twin doesn't need.
 
 The package-internal rule, for completeness: in-package code
 (events.go, subscribe.go, subscriber_command.go) reaches `*store`
@@ -1977,16 +1990,22 @@ Go method arguments; HTTP response fields become return values.
 | `POST /wipe`           | `Wipe() (int, int, int64)`                                                       | scopes, items, freed bytes           |
 | `POST /warm`           | `Warm(grouped map[string][]Item) (int, error)`                                   | replaced scope count                 |
 | `POST /rebuild`        | `Rebuild(grouped map[string][]Item) (int, int, error)`                           | scope count, item count              |
-| `GET /get`             | `Get(scope, id string, seq uint64) (Item, bool)`                                 | item, hit                            |
-| `GET /render`          | `Render(scope, id string, seq uint64) ([]byte, bool)`                            | rendered bytes, hit                  |
+| `GET /get`             | `GetByID(scope, id string) (Item, bool)`                                         | item, hit                            |
+| `GET /get`             | `GetBySeq(scope string, seq uint64) (Item, bool)`                                | item, hit                            |
+| `GET /render`          | `RenderByID(scope, id string) ([]byte, bool)`                                    | rendered bytes, hit                  |
+| `GET /render`          | `RenderBySeq(scope string, seq uint64) ([]byte, bool)`                           | rendered bytes, hit                  |
 | `GET /head`            | `Head(scope string, afterSeq uint64, limit int) ([]Item, bool, bool)`            | items, truncated, scope_found        |
 | `GET /tail`            | `Tail(scope string, limit, offset int) ([]Item, bool, bool)`                     | items, has_more, scope_found         |
 | `GET /stats`           | `Stats() Stats`                                                                  | typed snapshot                       |
 | `GET /scopelist`       | `ScopeList(prefix, after string, limit int) ([]ScopeListEntry, bool)`            | rows, truncated                      |
 
-For single-item lookup (`Get`, `Render`, `Delete`), pass `id != ""`
-to use the id path; pass `id == ""` and a non-zero `seq` to use
-the seq path. The validator enforces the id-xor-seq invariant.
+`/get` and `/render` are split into id-keyed and seq-keyed
+methods at the Go layer so caller intent is explicit at the call
+site, with no precedence rule to remember. `Delete` keeps the
+single-method shape (id-or-seq via arguments) because the HTTP
+endpoint's body shape mirrors that — pass `id != ""` to use the
+id path, or `id == ""` and `seq != 0` to use the seq path; the
+validator enforces the id-xor-seq invariant.
 
 Two control-plane methods have no HTTP equivalent because they
 return Go-only types (a channel, a stop function):
@@ -2058,8 +2077,8 @@ clone) of the same is roughly twice that.
 `Subscribe` is the in-process Go primitive on top of which addons
 build automatic drainers, write-event publishers, and reactive
 pipelines. The core ships one ready-to-deploy bridge on top of it
-(§7.5); custom Go subscribers are first-class — see the addon
-skeleton in §7.9.
+(§7.5); custom Go subscribers are first-class — see the
+"reactive drain" pattern summary in §11.
 
 ```go
 ch, unsub, err := gw.Subscribe(scope)
@@ -2232,179 +2251,7 @@ tmp-file is the closest portable equivalent. The cache itself
 holds nothing recoverable — `_events` is in-memory only — so the
 durability burden is entirely on the sink side.
 
-### 7.9 Addon skeleton — reactive event drain
-
-The canonical push-shaped addon: subscribe to a reserved scope,
-drain new items in batches on every wake-up, hand each item to a
-caller-supplied handler. Roughly the shape a Mercure publisher,
-in-process logger, or content-routing addon would take.
-
-```go
-package eventdrain
-
-import (
-	"context"
-	"fmt"
-	"log"
-
-	"github.com/VeloxCoding/scopecache"
-)
-
-// Drain wakes up on every write to scope and processes new items
-// in seq order via handler. Cursor advances per processed item;
-// items with seq <= cursor are removed via DeleteUpTo so the
-// reserved scope does not accumulate indefinitely.
-//
-// Crash-safety: this skeleton acks (DeleteUpTo) after the handler
-// returns. Real deployments should persist cursor durably before
-// calling DeleteUpTo — see §7.8.
-type Drain struct {
-	gw      *scopecache.Gateway
-	scope   string
-	handler func(scopecache.Item) error
-}
-
-func New(gw *scopecache.Gateway, scope string, handler func(scopecache.Item) error) *Drain {
-	return &Drain{gw: gw, scope: scope, handler: handler}
-}
-
-// Run blocks until ctx is cancelled or the subscription closes.
-// Returns ctx.Err() on cancellation, the first handler error if
-// the handler ever fails, or nil if the subscription was closed
-// from elsewhere.
-func (d *Drain) Run(ctx context.Context) error {
-	ch, unsub, err := d.gw.Subscribe(d.scope)
-	if err != nil {
-		return fmt.Errorf("subscribe %s: %w", d.scope, err)
-	}
-	defer unsub()
-
-	var cursor uint64
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case _, ok := <-ch:
-			if !ok {
-				return nil
-			}
-			for {
-				items, _, _ := d.gw.Head(d.scope, cursor, 100)
-				if len(items) == 0 {
-					break
-				}
-				for _, ev := range items {
-					if err := d.handler(ev); err != nil {
-						log.Printf("eventdrain: handler error at seq %d: %v", ev.Seq, err)
-						return err
-					}
-					cursor = ev.Seq
-				}
-				if _, err := d.gw.DeleteUpTo(d.scope, cursor); err != nil {
-					return fmt.Errorf("ack: %w", err)
-				}
-			}
-		}
-	}
-}
-```
-
-Wiring into an adapter:
-
-```go
-gw := scopecache.NewGateway(cfg)
-drain := eventdrain.New(gw, scopecache.EventsScopeName, func(ev scopecache.Item) error {
-    // Item.Payload is safe to retain — Gateway has cloned it.
-    return publishToMercure(ev.Scope, ev.ID, ev.Payload)
-})
-go func() {
-    if err := drain.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-        log.Printf("drain exited: %v", err)
-    }
-}()
-```
-
-Notes:
-
-- `Subscribe` is restricted to reserved scopes; pass
-  `scopecache.EventsScopeName` (cache-managed write events) or
-  `scopecache.InboxScopeName` (app-side fan-in).
-- The wake-up channel coalesces — a burst of N writes can produce
-  one wake-up; the inner loop drains until `Head` returns no items.
-- `Item.Payload` is a fresh slice (Gateway clones on exit, §7.3).
-  The handler can retain it, hash it, ship it elsewhere — the
-  cache's storage is unaffected.
-- A single subscriber per scope is enforced; if your addon needs
-  multi-fan-out, drain into an internal channel and split there.
-
-### 7.10 Addon skeleton — wrapper-on-write
-
-The canonical pre-write transformation addon: wrap `*Gateway`,
-intercept a write method, transform a field, forward. A
-content-hasher (id = SHA-256 of payload), an idempotency-key
-deduplicator, or a payload validator all share this shape.
-
-```go
-package contenthash
-
-import (
-	"crypto/sha256"
-	"encoding/hex"
-
-	"github.com/VeloxCoding/scopecache"
-)
-
-// Hasher wraps *Gateway and rewrites Append calls so the SHA-256
-// of the payload becomes the item's id. Caller-supplied id is
-// overridden. All other Gateway methods are reachable via Gw().
-type Hasher struct {
-	gw *scopecache.Gateway
-}
-
-func New(gw *scopecache.Gateway) *Hasher {
-	return &Hasher{gw: gw}
-}
-
-// Gw returns the underlying *Gateway for callers that need
-// non-wrapped methods (Get, Tail, Stats, etc.).
-func (h *Hasher) Gw() *scopecache.Gateway { return h.gw }
-
-// Append computes sha256(payload) and substitutes the hex digest
-// as item.ID, then forwards to gw.Append. The committed item
-// (with cache-assigned Seq + Ts) is returned unchanged.
-func (h *Hasher) Append(item scopecache.Item) (scopecache.Item, error) {
-	sum := sha256.Sum256(item.Payload)
-	item.ID = hex.EncodeToString(sum[:])
-	return h.gw.Append(item)
-}
-```
-
-Wiring:
-
-```go
-gw := scopecache.NewGateway(cfg)
-hasher := contenthash.New(gw)
-
-// Writes go through the wrapper:
-hasher.Append(scopecache.Item{Scope: "blobs", Payload: payload})
-
-// Reads go through the underlying gateway:
-item, hit := hasher.Gw().Get("blobs", contentID, 0)
-```
-
-Notes:
-
-- The wrapper holds `*Gateway`, not `*store`. Validation, capacity
-  enforcement, and clone discipline still apply — the wrapper
-  cannot bypass them.
-- Wrapping is selective: only methods you transform need wrapping.
-  Everything else is reachable via `Gw()`.
-- Multiple wrappers compose: `validate(hash(gw))` is a chain where
-  each layer adds one transformation. Each layer holds a
-  `*Gateway` (or another wrapper); the cache never sees the
-  composition.
-
-### 7.11 Reference materials
+### 7.9 Reference materials
 
 - [`scripts/drain_events.sh`](../scripts/drain_events.sh) —
   reference command implementation for the StartSubscriber bridge
@@ -2684,6 +2531,22 @@ own RFC, and let the operator provision the scope's contents
 through core endpoints. The core does not auto-create addon
 scopes — see §10.2 (`Reserved-scope enforcement` lives in
 operator policy).
+
+Two recurring patterns capture most non-trivial addons:
+
+- **Reactive drain.** Subscribe to a reserved scope (`Subscribe`,
+  §7.4) → on each wake-up read new items with `Head` → process →
+  `DeleteUpTo` the cursor to ack. Shape for event publishers,
+  in-process loggers, drainers shipping to external sinks.
+- **Wrapper on write.** Hold a `*Gateway`, intercept selected
+  write methods, transform a field, forward to the wrapped
+  Gateway. Other methods reach through directly. Multiple
+  wrappers compose (`validate(hash(gw))`). Shape for
+  content-hashers, idempotency-key dedupers, payload validators.
+
+Both rely on `*Gateway` only — never `*store`. The canonical
+worked examples live in `addons/<name>/` source files; the RFC
+keeps the patterns at this summary level.
 
 Per-addon contracts live in their own RFCs alongside this
 document. The first addon is `addons/guarded/` —
