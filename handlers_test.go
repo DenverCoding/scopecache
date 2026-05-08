@@ -1141,6 +1141,25 @@ func TestGet_ByIDAndBySeq(t *testing.T) {
 	}
 }
 
+// seq=0 is a malformed cursor (cache-assigned seqs start at 1). Reject
+// loudly with 400 rather than silently miss — matches /update and
+// /delete which reject seq=0 via validateIDOrSeq.
+func TestGet_RejectsSeqZero(t *testing.T) {
+	h, _ := newTestHandler(10)
+	code, _, raw := doRequest(t, h, "GET", "/get?scope=s&seq=0", "")
+	if code != 400 {
+		t.Fatalf("/get?seq=0: code=%d body=%s want 400", code, raw)
+	}
+}
+
+func TestRender_RejectsSeqZero(t *testing.T) {
+	h, _ := newTestHandler(10)
+	rr := doRawRequest(t, h, "GET", "/render?scope=s&seq=0")
+	if rr.Code != 400 {
+		t.Fatalf("/render?seq=0: code=%d body=%s want 400", rr.Code, rr.Body.String())
+	}
+}
+
 // --- /render ------------------------------------------------------------------
 
 // doRawRequest is a slimmed-down variant of doRequest that returns the full

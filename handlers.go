@@ -374,6 +374,13 @@ func parseLookupTarget(r *http.Request, endpoint string) (lookupTarget, error) {
 	if err != nil {
 		return lookupTarget{}, errors.New("the 'seq' parameter must be a valid unsigned integer")
 	}
+	// Cache-assigned seqs start at 1; seq=0 cannot match anything and
+	// would silently miss. Reject it loudly so a caller passing 0
+	// learns the value was malformed instead of getting hit:false.
+	// /update and /delete enforce the same rule via validateIDOrSeq.
+	if seq == 0 {
+		return lookupTarget{}, errors.New("the 'seq' parameter must be a positive integer")
+	}
 	return lookupTarget{Scope: scope, Seq: seq}, nil
 }
 

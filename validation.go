@@ -37,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrInvalidInput is the sentinel every top-level validator wraps
@@ -57,16 +58,20 @@ func wrapValidation(err error) error {
 }
 
 // checkKeyField enforces the shape rules for scope/id strings: length
-// cap, no surrounding whitespace, no embedded control characters.
-// Rejecting control bytes here avoids log/URL poisoning and keeps the
-// values safe to splice into diagnostic output.
+// cap, no surrounding whitespace, no embedded control characters,
+// must be valid UTF-8. Rejecting control bytes avoids log/URL
+// poisoning and keeps values safe to splice into diagnostic output;
+// rejecting invalid UTF-8 prevents JSON-marshal silently rewriting
+// malformed bytes to U+FFFD, which would break round-tripping
+// (input "\xff" returns as "�").
 //
 // The control-char check iterates BYTES, not runes. Range-over-string
 // would yield utf8.RuneError (0xFFFD) for malformed UTF-8, which is
 // >0x7f and would pass the check even though a raw 0x00..0x1f byte
 // was present. Byte iteration catches those regardless of UTF-8
-// validity; high bytes (0x80+) are left alone so valid multi-byte
-// UTF-8 passes through.
+// validity; the separate utf8.ValidString below covers the
+// high-byte case so valid multi-byte UTF-8 passes through but
+// malformed sequences are rejected.
 func checkKeyField(fieldName, value string, maxLen int) error {
 	if len(value) > maxLen {
 		return errors.New("the '" + fieldName + "' field must not exceed " + strconv.Itoa(maxLen) + " bytes")
@@ -79,6 +84,9 @@ func checkKeyField(fieldName, value string, maxLen int) error {
 		if c < 0x20 || c == 0x7f {
 			return errors.New("the '" + fieldName + "' field must not contain control characters")
 		}
+	}
+	if !utf8.ValidString(value) {
+		return errors.New("the '" + fieldName + "' field must be valid UTF-8")
 	}
 	return nil
 }

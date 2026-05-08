@@ -335,6 +335,13 @@ func TestValidateWriteItem_ScopeAndIDShapeRules(t *testing.T) {
 		{"id too long", Item{Scope: "s", ID: string(bigID), Payload: json.RawMessage(`{}`)}},
 		{"id has surrounding whitespace", Item{Scope: "s", ID: " x ", Payload: json.RawMessage(`{}`)}},
 		{"id has control char", Item{Scope: "s", ID: "x\x01", Payload: json.RawMessage(`{}`)}},
+		// Invalid UTF-8 in scope/id would round-trip-corrupt: encoding/json
+		// rewrites malformed bytes to U+FFFD on marshal, so the stored
+		// scope/id reads back as "�" and the original bytes are lost.
+		{"scope is bare high byte", Item{Scope: "\x80\x80", Payload: json.RawMessage(`{}`)}},
+		{"scope has truncated multi-byte sequence", Item{Scope: "a\xc3", Payload: json.RawMessage(`{}`)}},
+		{"id has invalid UTF-8 surrogate", Item{Scope: "s", ID: "\xed\xa0\x80", Payload: json.RawMessage(`{}`)}},
+		{"id has bare continuation byte", Item{Scope: "s", ID: "x\x80y", Payload: json.RawMessage(`{}`)}},
 	}
 	for _, tc := range cases {
 		item := tc.item
