@@ -3225,8 +3225,10 @@ func TestEvents_AutoPopulate_RecursionGuard(t *testing.T) {
 // Defense-in-depth: appendOneTrusted skips the validator (emit-path
 // shortcut), so a future writeEvent envelope-shape change that pushed
 // past eventsMaxItemBytes would silently consume store-wide bytes
-// without the cap firing. The explicit per-item gate inside
-// appendOneTrusted catches the overflow and drops the write loudly.
+// without the cap firing. The per-item gate inside
+// insertNewItemLocked catches the overflow and drops the write loudly
+// — it covers every caller that lands in the fresh-insert pipeline,
+// including this trusted shortcut.
 //
 // The cap derivation max(MaxItemBytes, Inbox.MaxItemBytes) + 1 KiB
 // envelope slack covers every emit shape produced today; this test
@@ -3252,8 +3254,8 @@ func TestStore_AppendOneTrusted_RejectsOversizedEventItem(t *testing.T) {
 	if err == nil {
 		t.Fatal("appendOneTrusted accepted oversized _events item; per-item cap gate is not firing")
 	}
-	if !strings.Contains(err.Error(), "exceeds eventsMaxItemBytes") {
-		t.Errorf("error=%q does not mention eventsMaxItemBytes", err.Error())
+	if !strings.Contains(err.Error(), "exceeds per-item cap") {
+		t.Errorf("error=%q does not mention per-item cap", err.Error())
 	}
 
 	// Cross-check: the same call with a small item succeeds. Confirms

@@ -262,6 +262,15 @@ func (b *scopeBuffer) insertNewItemLocked(item Item, nowUs int64) (Item, error) 
 
 	size := approxItemSize(item)
 	if b.store != nil {
+		// Per-item cap enforcement at the lowest insert layer so any
+		// future caller that reaches this function (including trusted
+		// shortcuts that bypass validateWriteItem) inherits the
+		// invariant. The external write path's checkItemSize already
+		// rejected oversized items, so this fires either as
+		// defense-in-depth or as the canonical gate for trusted writes.
+		if itemCap := b.store.maxItemBytesFor(item.Scope); size > itemCap {
+			return Item{}, fmt.Errorf("item size %d exceeds per-item cap %d for scope %q", size, itemCap, item.Scope)
+		}
 		ok, current, max := b.store.reserveBytes(size)
 		if !ok {
 			return Item{}, &StoreFullError{StoreBytes: current, AddedBytes: size, Cap: max}
