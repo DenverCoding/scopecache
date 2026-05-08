@@ -39,7 +39,7 @@ func (api *API) handleAppend(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 
@@ -70,7 +70,7 @@ func (api *API) handleUpsert(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 
@@ -105,7 +105,7 @@ func (api *API) handleCounterAdd(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 
@@ -165,7 +165,7 @@ func (api *API) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 

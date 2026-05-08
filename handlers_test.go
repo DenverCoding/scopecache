@@ -255,6 +255,34 @@ func TestAppend_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// RFC 7231 §7.4.1: 405 responses MUST carry an Allow header naming
+// the supported method(s). One spot-check per route family — the
+// helper is shared, so coverage on one POST + one GET endpoint
+// pins the contract for every other handler that uses
+// methodNotAllowed.
+func TestMethodNotAllowed_SetsAllowHeader(t *testing.T) {
+	h, _ := newTestHandler(10)
+
+	cases := []struct {
+		path        string
+		badMethod   string
+		wantAllowed string
+	}{
+		{"/append", "GET", "POST"},
+		{"/get", "POST", "GET"},
+	}
+	for _, c := range cases {
+		rr := doRawRequest(t, h, c.badMethod, c.path)
+		if rr.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s: code=%d want 405", c.badMethod, c.path, rr.Code)
+			continue
+		}
+		if got := rr.Header().Get("Allow"); got != c.wantAllowed {
+			t.Errorf("%s %s: Allow=%q want %q", c.badMethod, c.path, got, c.wantAllowed)
+		}
+	}
+}
+
 // --- /warm --------------------------------------------------------------------
 
 func TestWarm_LeavesOtherScopesUntouched(t *testing.T) {

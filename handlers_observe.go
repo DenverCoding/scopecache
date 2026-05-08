@@ -31,7 +31,7 @@ func (api *API) handleStats(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodGet)
 		return
 	}
 
@@ -82,7 +82,7 @@ func (api *API) handleScopeList(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodGet)
 		return
 	}
 
@@ -131,6 +131,7 @@ func (api *API) handleScopeList(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) handleHelp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		_, _ = w.Write([]byte("method not allowed\n"))

@@ -93,7 +93,7 @@ func (api *API) handleHead(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodGet)
 		return
 	}
 
@@ -135,7 +135,7 @@ func (api *API) handleTail(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodGet)
 		return
 	}
 
@@ -166,7 +166,7 @@ func (api *API) handleGet(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodGet)
 		return
 	}
 
@@ -227,7 +227,7 @@ func (api *API) handleRender(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodGet)
 		return
 	}
 

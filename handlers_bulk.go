@@ -22,7 +22,7 @@ func (api *API) handleWarm(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 
@@ -52,7 +52,7 @@ func (api *API) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 

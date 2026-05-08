@@ -23,7 +23,7 @@ func (api *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 
@@ -59,7 +59,7 @@ func (api *API) handleDeleteUpTo(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 
@@ -91,7 +91,7 @@ func (api *API) handleDeleteScope(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 
@@ -132,7 +132,7 @@ func (api *API) handleWipe(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started)
+		methodNotAllowed(w, started, http.MethodPost)
 		return
 	}
 

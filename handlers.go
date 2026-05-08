@@ -327,7 +327,13 @@ func responseTooLarge(w http.ResponseWriter, started time.Time, written, cap int
 	}, started)
 }
 
-func methodNotAllowed(w http.ResponseWriter, started time.Time) {
+// methodNotAllowed responds 405 with an Allow header naming the
+// method this endpoint accepts, per RFC 7231 §7.4.1 ("an origin
+// server MUST generate an Allow header field in a 405 response").
+// `allowed` is typically a single method (POST or GET); pass a
+// comma-separated list if a future endpoint accepts multiple.
+func methodNotAllowed(w http.ResponseWriter, started time.Time, allowed string) {
+	w.Header().Set("Allow", allowed)
 	writeJSONWithDuration(w, http.StatusMethodNotAllowed, orderedFields{
 		{"ok", false},
 		{"error", "the HTTP method is not allowed for this endpoint"},
