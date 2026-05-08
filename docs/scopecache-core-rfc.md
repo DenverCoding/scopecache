@@ -2414,10 +2414,6 @@ Notes:
   `SCOPECACHE_SCOPE`, `SCOPECACHE_SOCKET_PATH`, and
   `SCOPECACHE_OUTPUT_DIR`; drains the scope into timestamped JSONL
   files and exits.
-- [`scripts/e2e_subscriber.sh`](../scripts/e2e_subscriber.sh) —
-  end-to-end smoke test that boots the standalone binary with
-  `subscriber_command` set, performs 10 writes, polls until
-  `_events` is empty, and verifies the JSONL output shape.
 - [`gateway.go`](../gateway.go) +
   [`gateway_clone.go`](../gateway_clone.go) — implementation of
   the Gateway boundary and clone discipline.

@@ -18,3 +18,8 @@
 /bench-results/
 /deploy/Caddyfile.caddyscope.bench-backup
 /Caddyfile.caddyscope.bench-backup
+# Scripts are local-only operator/dev tooling; only drain_events.sh
+# (the StartSubscriber bridge reference, cited from docs/scopecache-core-rfc.md
+# §7.11) ships with the repo.
+/scripts/*
+!/scripts/drain_events.sh
