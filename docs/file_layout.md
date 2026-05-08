@@ -11,7 +11,6 @@ caddy_module/                         (root module github.com/VeloxCoding/scopec
 ├── Dockerfile                        (standalone binary)
 ├── Dockerfile.caddyscope             (xcaddy build: Caddy + scopecache module)
 ├── docker-compose.yml
-├── CLAUDE.md                         (gitignored — local-only)
 ├── README.md
 │
 │   ─── package scopecache (core, stdlib-only) ─────────────────────────────────
@@ -103,11 +102,8 @@ caddy_module/                         (root module github.com/VeloxCoding/scopec
 │   └── Caddyfile.caddyscope          ── working Caddy + scopecache demo
 │
 ├── scripts/
-│   └── drain_events.sh               ── reference subscriber-command (POSIX shell, drains _events;
-│                                        the other scripts in this dir are gitignored, local-only)
+│   └── drain_events.sh               ── reference subscriber-command (POSIX shell, drains _events)
 │
-├── archive/                          (gitignored; pre-strip handler files for reference)
-├── harness/                          (gitignored; live FrankenPHP harness)
 └── .github/workflows/
     ├── ci.yml                        (Go build + test on PR/push)
     ├── release.yml                   (release pipeline)
