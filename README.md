@@ -66,6 +66,29 @@ Around 75,000 HTTP requests per second on commodity hardware over a
 loopback Unix socket; see [scripts/bench.sh](scripts/bench.sh) for the
 harness and `bench-results/` for tagged runs.
 
+### Roundtrip benchmark vs Redis-backed routes
+
+A side-by-side benchmark comparing three HTTP read paths under
+identical `wrk -t4 -c64 -d5s` load on the same host (50,000-item
+dataset, 10 runs averaged):
+
+| Route | Requests/sec | p50 latency |
+|---|---:|---:|
+| Caddy → Node.js → Redis (Unix socket) | 30,414 | 1.870 ms |
+| Caddy/FrankenPHP worker → Redis | 30,543 | 1.969 ms |
+| Caddy → scopecache (in-process) | **222,554** | **0.187 ms** |
+
+Scopecache reaches ~7.3× the throughput of either Redis-backed route.
+The win is **architectural, not a Redis-vs-scopecache speed comparison**:
+running the cache inside the Caddy process removes the application-
+runtime hop and the Redis roundtrip from the read path entirely. A
+single in-process `getBySeq` lookup itself takes ~43 ns regardless of
+scope size (hash-map, O(1)) — about 23 million lookups per second per
+core.
+
+Full methodology, hardware, container/CPU pinning, and per-percentile
+results in [docs/benchmark_roundtrip.md](docs/benchmark_roundtrip.md).
+
 ## Status
 
 Pre-1.0. The core HTTP and Go API surfaces are still subject to
