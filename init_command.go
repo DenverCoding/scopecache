@@ -53,9 +53,10 @@ func (g *Gateway) RunInitCommand(ctx context.Context, command string, extraEnv [
 	if command == "" {
 		return nil
 	}
-	if logf != nil {
-		logf("init: running %s", command)
+	if logf == nil {
+		logf = func(string, ...any) {}
 	}
+	logf("init: running %s", command)
 	cmd := exec.CommandContext(ctx, command)
 	cmd.Env = append(os.Environ(), extraEnv...)
 	cmd.Stdin = nil
@@ -68,18 +69,14 @@ func (g *Gateway) RunInitCommand(ctx context.Context, command string, extraEnv [
 	// in file-header). A failure on the wipe is logged but not
 	// surfaced — an empty cache plus a stale event stream is still
 	// a working cache, and the next operator action will overwrite it.
-	if _, delErr := g.DeleteUpTo(EventsScopeName, math.MaxUint64); delErr != nil && logf != nil {
+	if _, delErr := g.DeleteUpTo(EventsScopeName, math.MaxUint64); delErr != nil {
 		logf("init: clear %s: %v", EventsScopeName, delErr)
 	}
 
 	if runErr != nil {
-		if logf != nil {
-			logf("init: %s: %v", command, runErr)
-		}
+		logf("init: %s: %v", command, runErr)
 		return fmt.Errorf("scopecache init command %s: %w", command, runErr)
 	}
-	if logf != nil {
-		logf("init: %s: completed", command)
-	}
+	logf("init: %s: completed", command)
 	return nil
 }

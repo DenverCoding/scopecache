@@ -517,6 +517,16 @@ func TestStartReservedSubscribers(t *testing.T) {
 			t.Errorf("after stop, re-Subscribe to _inbox: %v (stop did not release the slot)", err)
 		}
 	})
+
+	// nil logf must not panic — pure-Go callers (vs the adapter
+	// wrappers that always pass log.Printf or caddy.Log...Infof) may
+	// reasonably pass nil to suppress lifecycle logging. Mirrors the
+	// RunInitCommand contract documented in init_command.go.
+	t.Run("nil logf does not panic", func(t *testing.T) {
+		gw := NewGateway(Config{Events: EventsConfig{Mode: EventsModeFull}})
+		stop := gw.StartReservedSubscribers(command, nil)
+		stop()
+	})
 }
 
 // pidIsRunning returns true iff /proc/<pid>/status reports a live

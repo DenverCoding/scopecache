@@ -125,10 +125,14 @@ func (gw *Gateway) StartSubscriber(scope, command string) (stop func(), err erro
 //
 // stop tears down subscriptions in reverse start-order. logf takes
 // the standard (string, ...any) shape; pass log.Printf or any
-// equivalent.
+// equivalent. logf may be nil — the bridge then runs without
+// lifecycle logging (matches RunInitCommand's contract).
 func (g *Gateway) StartReservedSubscribers(command string, logf func(string, ...any)) func() {
 	if command == "" {
 		return func() {}
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
 	}
 	stops := []func(){}
 	for _, scope := range []string{EventsScopeName, InboxScopeName} {
