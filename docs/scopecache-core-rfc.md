@@ -401,11 +401,19 @@ successful mutation, and how much each entry contains:
 |---|---|
 | `off` *(default)* | Auto-populate disabled; zero overhead on the write path. Operators opt in when a drainer is ready to consume. |
 | `notify` | Each committed mutation produces an event with addressing only — `{op, scope, id?, seq, ts}`. Sufficient for drainers that re-fetch from cache state on wake-up. |
-| `full` | Each committed mutation produces an event with the action-payload included. Sufficient for drainers replicating state without re-querying. |
+| `full` | Each committed mutation produces an event with the user-write payload included under a `data` field — `{op, scope, id?, seq, ts, data}`. Sufficient for drainers replicating state without re-querying. |
 
-Action-payload here means the inputs the caller sent, not the
-result the cache computed. `/counter_add` events carry `by` (the
-increment), not the new value; `/delete_up_to` events carry
+The carried payload rides under the JSON key `data` (CloudEvents
+convention) rather than `payload`, so a `/tail _events` response
+does not surface "payload" at two nesting levels — the outer
+`payload` field is the cache's generic `Item.Payload` (the
+writeEvent JSON itself), the inner `data` is the original
+user-write content.
+
+The action-vector — `op`, addressing fields (`scope`, `id?`,
+`seq?`), and `data?` — captures the inputs the caller sent, not
+the result the cache computed. `/counter_add` events carry `by`
+(the increment), not the new value; `/delete_up_to` events carry
 `max_seq`, not the deleted-count. This makes the event stream
 replay-able and matches the WAL discipline downstream sinks
 expect.
