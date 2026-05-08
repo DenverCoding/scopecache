@@ -41,10 +41,41 @@ docker compose up -d --build caddyscope
 curl http://localhost:8081/help
 ```
 
-The bundled Caddyfile is in
-[deploy/Caddyfile.caddyscope](deploy/Caddyfile.caddyscope) — copy
-it as the starting point for your own deployment. The xcaddy
-build recipe lives in
+The bundled [deploy/Caddyfile.caddyscope](deploy/Caddyfile.caddyscope)
+is already wired for GET and POST:
+
+```caddyfile
+:8080 {
+    scopecache {
+        scope_max_items 100000
+        max_store_mb    100
+        max_item_mb     1
+    }
+    respond 404
+}
+```
+
+- `:8080 { ... }` — Caddy listens on port 8080 inside the container;
+  docker-compose maps that to 8081 on your host.
+- `scopecache { ... }` — every scopecache endpoint is mounted at `/`
+  (so `GET /help`, `GET /tail`, `POST /append`, …).
+- `respond 404` — anything scopecache doesn't recognise → 404.
+- The three knobs inside are capacity limits only; they don't
+  restrict GET/POST. Every verb scopecache supports just works.
+
+**Example: POST and GET round-trip**
+
+```bash
+# write an item
+curl -X POST http://localhost:8081/append \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"demo","payload":{"msg":"hello"}}'
+
+# read it back
+curl 'http://localhost:8081/tail?scope=demo'
+```
+
+The xcaddy build recipe for your own Caddy binary lives in
 [Dockerfile.caddyscope](Dockerfile.caddyscope).
 
 ## Performance
