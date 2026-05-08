@@ -1,6 +1,7 @@
 package scopecache
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -3193,6 +3194,47 @@ func TestEvents_AutoPopulate_RecursionGuard(t *testing.T) {
 // and Store.eventsDropsTotal is bumped. Operators see the drop via
 // /stats once that enrichment lands; for now the test reads the
 // counter directly.
+// Defense-in-depth: appendOneTrusted skips the validator (emit-path
+// shortcut), so a future writeEvent envelope-shape change that pushed
+// past eventsMaxItemBytes would silently consume store-wide bytes
+// without the cap firing. The explicit per-item gate inside
+// appendOneTrusted catches the overflow and drops the write loudly.
+//
+// The cap derivation max(MaxItemBytes, Inbox.MaxItemBytes) + 1 KiB
+// envelope slack covers every emit shape produced today; this test
+// drives the gate directly with a synthetic over-cap item so the
+// safety net itself is exercised.
+func TestStore_AppendOneTrusted_RejectsOversizedEventItem(t *testing.T) {
+	// Modest caps so eventsMaxItemBytes = 8 KiB + 1 KiB = 9 KiB and
+	// we can build a payload that lands just past it.
+	cfg := Config{
+		ScopeMaxItems: 100,
+		MaxStoreBytes: 100 << 20,
+		MaxItemBytes:  8 << 10,
+	}
+	gw := NewGateway(cfg)
+	s := gw.store
+
+	// Bytes past the derived cap. The exact size doesn't matter; we
+	// just need approxItemSize(item) > eventsMaxItemBytes.
+	body := bytes.Repeat([]byte("a"), int(s.eventsMaxItemBytes)+512)
+	wrapped := []byte(`{"d":"` + string(body) + `"}`)
+
+	_, err := s.appendOneTrusted(Item{Scope: EventsScopeName, Payload: wrapped})
+	if err == nil {
+		t.Fatal("appendOneTrusted accepted oversized _events item; per-item cap gate is not firing")
+	}
+	if !strings.Contains(err.Error(), "exceeds eventsMaxItemBytes") {
+		t.Errorf("error=%q does not mention eventsMaxItemBytes", err.Error())
+	}
+
+	// Cross-check: the same call with a small item succeeds. Confirms
+	// the gate is not over-eager.
+	if _, err := s.appendOneTrusted(Item{Scope: EventsScopeName, Payload: []byte(`{"v":1}`)}); err != nil {
+		t.Errorf("appendOneTrusted rejected small _events item: %v", err)
+	}
+}
+
 func TestEvents_AutoPopulate_DropsOnOverflow(t *testing.T) {
 	// Tight byte budget: reserved-scope overhead for _events +
 	// _inbox (2 KiB) + scope-buffer overhead for "posts" (1 KiB) +

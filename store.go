@@ -35,6 +35,7 @@ package scopecache
 
 import (
 	"errors"
+	"fmt"
 	"hash/maphash"
 	"math"
 	"sort"
@@ -626,12 +627,33 @@ func (s *store) appendOne(item Item) (Item, error) {
 // validator entirely; all callers are responsible for delivering an
 // item the validator would have accepted.
 //
+// Defensive per-item cap on `_events`: the external path enforces
+// checkItemSize via validateWriteItem, but emit bypasses validation
+// entirely. The cap derivation eventsMaxItemBytes = max(user-cap,
+// inbox-cap) + 1 KiB envelope slack covers every emit shape today,
+// but a future writeEvent field addition could quietly grow the
+// envelope past the slack. Keep an explicit gate here so an
+// oversized event drops loudly instead of silently consuming
+// store-wide bytes (eventsDropsTotal increments on the caller side).
+//
 // On commit it invokes emitAppendEvent to auto-populate `_events`,
 // AFTER buf.appendItem returned (b.mu released) — capture-under-
 // lock, emit-outside-lock. With Events.Mode == Off the emit is a
 // one-branch no-op; Notify / Full do a second appendOneTrusted
 // into `_events`, recursion-guarded inside the helper.
 func (s *store) appendOneTrusted(item Item) (Item, error) {
+	if item.Scope == EventsScopeName {
+		// renderBytes precompute matches what insertNewItemLocked
+		// would do, so approxItemSize is accurate. Setting it here
+		// is also free for the downstream path: insertNewItemLocked's
+		// nil-check skips the recompute.
+		if item.renderBytes == nil {
+			item.renderBytes = precomputeRenderBytes(item.Payload)
+		}
+		if size := approxItemSize(item); size > s.eventsMaxItemBytes {
+			return Item{}, fmt.Errorf("event item size %d exceeds eventsMaxItemBytes %d", size, s.eventsMaxItemBytes)
+		}
+	}
 	buf, created, err := s.getOrCreateScopeTrackingCreated(item.Scope)
 	if err != nil {
 		return Item{}, err
