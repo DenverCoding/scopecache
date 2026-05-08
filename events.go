@@ -108,7 +108,7 @@ func (s *store) emitEvent(evt writeEvent) {
 		s.eventsDropsTotal.Add(1)
 		return
 	}
-	if _, err := s.appendOne(Item{Scope: EventsScopeName, Payload: body}); err != nil {
+	if _, err := s.appendOneTrusted(Item{Scope: EventsScopeName, Payload: body}); err != nil {
 		// Cap overflow on `_events` (or any other failure) — drop
 		// silently. The original user-write already committed.
 		s.eventsDropsTotal.Add(1)

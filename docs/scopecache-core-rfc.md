@@ -311,17 +311,26 @@ boot flow — including the operator-supplied init script — lives in
 append-only-drain-stream pattern. The cache allows the operations
 that fit that pattern and rejects the operations that don't:
 
-| Operation | On `_events` / `_inbox` | Rationale |
-|---|---|---|
-| `/append` | ✅ allowed | Apps write to `_inbox`; cache auto-populates `_events` |
-| `/delete`, `/delete_up_to` | ✅ allowed | Drainer cleanup — releasing items the consumer has handled |
-| `/get`, `/head`, `/tail`, `/render` | ✅ allowed | Drainers and observers must be able to read |
-| `/stats`, `/scopelist` | ✅ allowed | Operators must see infrastructure scopes for capacity planning |
-| `/upsert`, `/update`, `/counter_add` | ❌ 400 | Drain-stream semantics: there is no "in-flight item to update" — entries are either still in the buffer or already drained. |
-| `/delete_scope` | ❌ 400 | Would break the reservation invariant (subscribers attached to a vanished scope) |
-| `/warm` (target = reserved) | ❌ 400 | Idem |
-| `/rebuild` (input contains reserved) | ❌ 400 | Idem |
-| `/wipe` | ✅ drops + immediately re-creates | Atomic under all-shard write lock; subscribers don't see a gap |
+| Operation | On `_events` | On `_inbox` | Rationale |
+|---|---|---|---|
+| `/append` | ❌ 400 | ✅ allowed | `_events` is **cache-only**: every entry is a writeEvent JSON produced by the cache itself, so drainers can rely on a uniform shape. `_inbox` is the app-populated fan-in by design. |
+| `/delete`, `/delete_up_to` | ✅ allowed | ✅ allowed | Drainer cleanup — releasing items the consumer has handled |
+| `/get`, `/head`, `/tail`, `/render` | ✅ allowed | ✅ allowed | Drainers and observers must be able to read |
+| `/stats`, `/scopelist` | ✅ allowed | ✅ allowed | Operators must see infrastructure scopes for capacity planning |
+| `/upsert`, `/update`, `/counter_add` | ❌ 400 | ❌ 400 | Drain-stream semantics: there is no "in-flight item to update" — entries are either still in the buffer or already drained. |
+| `/delete_scope` | ❌ 400 | ❌ 400 | Would break the reservation invariant (subscribers attached to a vanished scope) |
+| `/warm` (target = reserved) | ❌ 400 | ❌ 400 | Idem |
+| `/rebuild` (input contains reserved) | ❌ 400 | ❌ 400 | Idem |
+| `/wipe` | ✅ drops + immediately re-creates | ✅ drops + immediately re-creates | Atomic under all-shard write lock; subscribers don't see a gap |
+
+The cache-only contract on `_events` lets a drainer parse every
+entry as a writeEvent JSON without defensive shape detection. Apps
+that want to inject synthetic events for testing or replay
+purposes do so by enabling `events_mode=full` and writing to a
+user-managed scope — auto-populate produces a normal writeEvent in
+`_events` exactly as a real domain write would. The auto-populate
+path (`store.appendOneTrusted` invoked by `emitEvent`) bypasses
+the validator and is the only writer to `_events` in production.
 
 The reservation is **scope-level only** — item-level cleanup
 (`/delete`, `/delete_up_to`) and item-level reads work normally,

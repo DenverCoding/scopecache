@@ -606,20 +606,32 @@ func (s *store) cleanupIfEmptyAndUnused(scope string, buf *scopeBuffer) {
 	buf.store = nil
 }
 
-// appendOne is the atomic /append write-path. Creates the target
-// scope on demand, reserves item bytes, commits the item, and rolls
-// back the empty scope on item-reservation failure so a 507 cannot
-// leak per-scope overhead onto the store-byte cap.
-//
-// On commit it invokes emitAppendEvent to auto-populate `_events`,
-// AFTER buf.appendItem returned (b.mu released) — capture-under-
-// lock, emit-outside-lock. With Events.Mode == Off the emit is a
-// one-branch no-op; Notify / Full do a second appendOne into
-// `_events`, recursion-guarded inside the helper.
+// appendOne is the atomic /append write-path for external callers
+// (HTTP handlers + Gateway.Append). Validates the item, then routes
+// through appendOneTrusted for the actual commit. /append on
+// `_events` is rejected at the validator: that scope is cache-only.
+// Apps inject events by /append on a user scope with EventsModeFull,
+// which auto-populates `_events` via the trusted path.
 func (s *store) appendOne(item Item) (Item, error) {
 	if err := validateWriteItem(&item, "/append", s.maxItemBytesFor(item.Scope)); err != nil {
 		return Item{}, err
 	}
+	return s.appendOneTrusted(item)
+}
+
+// appendOneTrusted is the post-validation commit path used by
+// appendOne (after shape validation) and by emitEvent (auto-populate
+// into `_events`, where the caller has already produced
+// well-formed bytes via json.Marshal of writeEvent). Skips the
+// validator entirely; all callers are responsible for delivering an
+// item the validator would have accepted.
+//
+// On commit it invokes emitAppendEvent to auto-populate `_events`,
+// AFTER buf.appendItem returned (b.mu released) — capture-under-
+// lock, emit-outside-lock. With Events.Mode == Off the emit is a
+// one-branch no-op; Notify / Full do a second appendOneTrusted
+// into `_events`, recursion-guarded inside the helper.
+func (s *store) appendOneTrusted(item Item) (Item, error) {
 	buf, created, err := s.getOrCreateScopeTrackingCreated(item.Scope)
 	if err != nil {
 		return Item{}, err
@@ -631,22 +643,17 @@ func (s *store) appendOne(item Item) (Item, error) {
 		}
 		return result, appendErr
 	}
-	// Order: emit FIRST (recurses into appendOne(_events) which itself
-	// fires notifySubscriber(_events) at the bottom of its own frame),
-	// THEN notify on the SCOPE we just wrote. The outer notify is
-	// gated to reserved scopes because Subscribe rejects non-reserved
-	// scopes outright (see ErrInvalidSubscribeScope) — for any other
-	// scope notifySubscriber would acquire subsMu.RLock and do a map
-	// lookup that can never hit. Skipping the call entirely on the hot
-	// user-scope path saves that lock/lookup pair per append. The
-	// recursive emitAppendEvent → appendOne(_events) frame still
-	// notifies _events because _events IS reserved, so EventsModeFull
-	// drainers stay woken correctly.
-	//
-	// Single direct notify-call site in the cache — /upsert, /update,
-	// /counter_add, /warm, /rebuild are validator-gated off reserved
-	// scopes (RFC §2.6), so every write that targets a reserved scope
-	// routes through this method.
+	// Order: emit FIRST (recurses into appendOneTrusted(_events) which
+	// itself fires notifySubscriber(_events) at the bottom of its own
+	// frame), THEN notify on the SCOPE we just wrote. The outer
+	// notify is gated to reserved scopes because Subscribe rejects
+	// non-reserved scopes outright (see ErrInvalidSubscribeScope) —
+	// for any other scope notifySubscriber would acquire subsMu.RLock
+	// and do a map lookup that can never hit. Skipping the call
+	// entirely on the hot user-scope path saves that lock/lookup pair
+	// per append. The recursive emitAppendEvent → appendOneTrusted
+	// (_events) frame still notifies _events because _events IS
+	// reserved, so EventsModeFull drainers stay woken correctly.
 	s.emitAppendEvent(result.Scope, result.ID, result.Seq, result.Ts, result.Payload)
 	if isReservedScope(result.Scope) {
 		s.notifySubscriber(result.Scope)

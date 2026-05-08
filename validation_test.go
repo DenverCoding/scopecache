@@ -628,11 +628,22 @@ func TestReservedScopes_RejectsScopeLevelAndMutationOps(t *testing.T) {
 				t.Errorf("validateDeleteScopeRequest on %q: expected reservation error, got nil", scope)
 			}
 
-			// /append on reserved must still succeed at the validator level —
-			// apps write to _inbox, the cache later auto-populates _events.
+			// /append asymmetry on reserved scopes:
+			//   - _inbox: allowed (app-populated fan-in by design).
+			//   - _events: rejected (cache-only; auto-populate writes
+			//     reach _events via store.appendOneTrusted, which
+			//     skips the validator).
 			appendIt := Item{Scope: scope, Payload: payload}
-			if err := validateWriteItem(&appendIt, "/append", maxItem); err != nil {
-				t.Errorf("validateWriteItem on %q: append must be allowed, got %v", scope, err)
+			err := validateWriteItem(&appendIt, "/append", maxItem)
+			switch scope {
+			case InboxScopeName:
+				if err != nil {
+					t.Errorf("validateWriteItem on %q: append must be allowed, got %v", scope, err)
+				}
+			case EventsScopeName:
+				if err == nil {
+					t.Errorf("validateWriteItem on %q: append must be rejected (cache-only)", scope)
+				}
 			}
 			// /delete on reserved must succeed (drainer single-item cleanup).
 			if err := validateDeleteRequest(deleteRequest{Scope: scope, ID: "x"}); err != nil {

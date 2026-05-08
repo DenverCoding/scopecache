@@ -2448,12 +2448,24 @@ func TestReservedScopes_HTTPRejections(t *testing.T) {
 		t.Run("scope="+scope, func(t *testing.T) {
 			h, _ := newTestHandler(10)
 
-			// Pre-seed an item so /update has something to (notionally) target.
-			if code, _, _ := doRequest(t, h, "POST", "/append",
-				fmt.Sprintf(`{"scope":%q,"id":"x","payload":{"v":1}}`, scope)); code != 200 {
-				t.Fatalf("pre-seed append: code=%d", code)
+			// Pre-seed via the legitimate write path. /append is rejected
+			// on _events (cache-only), so for that scope we need a
+			// different way to land an item. /append on a user scope
+			// with events_mode=off keeps _events empty; trigger via
+			// auto-populate using a separate handler isn't part of this
+			// rejection test. Skip pre-seed for _events — none of the
+			// rejected ops require an existing item.
+			if scope == InboxScopeName {
+				if code, _, _ := doRequest(t, h, "POST", "/append",
+					fmt.Sprintf(`{"scope":%q,"id":"x","payload":{"v":1}}`, scope)); code != 200 {
+					t.Fatalf("pre-seed append: code=%d", code)
+				}
 			}
 
+			// Per-scope rejection set. /append on _events is also rejected
+			// (cache-only), so it joins the list there. /append on _inbox
+			// is allowed (app-populated fan-in by design) and exercised
+			// as the legitimate-op sanity check below.
 			cases := []struct {
 				name, method, path, body string
 			}{
@@ -2463,6 +2475,11 @@ func TestReservedScopes_HTTPRejections(t *testing.T) {
 				{"delete_scope", "POST", "/delete_scope", fmt.Sprintf(`{"scope":%q}`, scope)},
 				{"warm", "POST", "/warm", fmt.Sprintf(`{"items":[{"scope":%q,"id":"x","payload":{"v":1}}]}`, scope)},
 				{"rebuild", "POST", "/rebuild", fmt.Sprintf(`{"items":[{"scope":%q,"id":"x","payload":{"v":1}}]}`, scope)},
+			}
+			if scope == EventsScopeName {
+				cases = append(cases, struct {
+					name, method, path, body string
+				}{"append", "POST", "/append", fmt.Sprintf(`{"scope":%q,"id":"x","payload":{"v":1}}`, scope)})
 			}
 			for _, c := range cases {
 				code, out, raw := doRequest(t, h, c.method, c.path, c.body)
@@ -2477,13 +2494,25 @@ func TestReservedScopes_HTTPRejections(t *testing.T) {
 			}
 
 			// Sanity: legitimate ops MUST still work after the rejections.
-			if code, _, raw := doRequest(t, h, "POST", "/append",
-				fmt.Sprintf(`{"scope":%q,"id":"y","payload":{"v":1}}`, scope)); code != 200 {
-				t.Errorf("/append after rejections: code=%d body=%s", code, raw)
-			}
-			if code, out, _ := doRequest(t, h, "GET",
-				fmt.Sprintf("/get?scope=%s&id=x", scope), ""); code != 200 || !mustBool(t, out, "hit") {
-				t.Errorf("/get after rejections: code=%d hit=%v", code, out["hit"])
+			// _inbox accepts /append; _events does not, so for that scope
+			// the sanity check is just the read path on an (empty) scope.
+			if scope == InboxScopeName {
+				if code, _, raw := doRequest(t, h, "POST", "/append",
+					fmt.Sprintf(`{"scope":%q,"id":"y","payload":{"v":1}}`, scope)); code != 200 {
+					t.Errorf("/append after rejections: code=%d body=%s", code, raw)
+				}
+				if code, out, _ := doRequest(t, h, "GET",
+					fmt.Sprintf("/get?scope=%s&id=x", scope), ""); code != 200 || !mustBool(t, out, "hit") {
+					t.Errorf("/get after rejections: code=%d hit=%v", code, out["hit"])
+				}
+			} else {
+				// _events: /tail on the empty scope must still return 200
+				// + count=0 (read paths stay open even after the write
+				// rejections).
+				if code, out, _ := doRequest(t, h, "GET",
+					fmt.Sprintf("/tail?scope=%s&limit=10", scope), ""); code != 200 || mustFloat(t, out, "count") != 0 {
+					t.Errorf("/tail after rejections: code=%d count=%v", code, out["count"])
+				}
 			}
 		})
 	}
@@ -2498,7 +2527,10 @@ func TestReservedScopes_HTTPRejections(t *testing.T) {
 func TestReservedScopes_WipeRestoresBaseline(t *testing.T) {
 	h, _ := newTestHandler(10)
 
-	// Add a user scope plus content in both reserved scopes.
+	// Add a user scope plus content in _inbox (the app-writable
+	// reserved scope). _events is cache-only so we don't seed it
+	// directly; the lifecycle property under test (post-wipe baseline)
+	// applies regardless of pre-wipe content there.
 	if code, _, _ := doRequest(t, h, "POST", "/append",
 		`{"scope":"user-data","id":"u1","payload":{"v":1}}`); code != 200 {
 		t.Fatalf("/append user-data: code=%d", code)
@@ -2506,10 +2538,6 @@ func TestReservedScopes_WipeRestoresBaseline(t *testing.T) {
 	if code, _, _ := doRequest(t, h, "POST", "/append",
 		`{"scope":"_inbox","id":"i1","payload":{"v":1}}`); code != 200 {
 		t.Fatalf("/append _inbox: code=%d", code)
-	}
-	if code, _, _ := doRequest(t, h, "POST", "/append",
-		`{"scope":"_events","id":"l1","payload":{"v":1}}`); code != 200 {
-		t.Fatalf("/append _events: code=%d", code)
 	}
 
 	// Wipe everything.
@@ -2609,10 +2637,15 @@ func TestReservedScopes_RebuildRestoresBaseline(t *testing.T) {
 		t.Error("post-rebuild: _inbox/i1 still present (rebuild drops, init re-creates empty)")
 	}
 
-	// Reserved scopes accept new traffic immediately.
+	// _inbox accepts new traffic immediately after rebuild
+	// (re-creation under the same all-shard write lock that did
+	// the swap, so the scope is reachable as soon as Provision
+	// returns). _events is cache-only so we can't /append directly;
+	// auto-populate from this very /append flows into a fresh
+	// _events anyway under EventsModeFull (covered separately).
 	if code, _, raw := doRequest(t, h, "POST", "/append",
-		`{"scope":"_events","id":"after-rebuild","payload":{"v":1}}`); code != 200 {
-		t.Fatalf("/append _events after rebuild: code=%d body=%s", code, raw)
+		`{"scope":"_inbox","id":"after-rebuild","payload":{"v":1}}`); code != 200 {
+		t.Fatalf("/append _inbox after rebuild: code=%d body=%s", code, raw)
 	}
 }
 
@@ -2633,23 +2666,36 @@ func newReservedScopesTestHandler(t *testing.T, cfg Config) (http.Handler, *API)
 // Cross-checks that the same store still enforces ScopeMaxItems on
 // user-scopes — the exemption must be scoped to `_events` alone, not
 // leaked store-wide.
+//
+// Driven via auto-populate (events_mode=full + N user-scope writes)
+// because /append on _events is rejected as cache-only.
 func TestReservedScopes_EventsExemptFromScopeMaxItems(t *testing.T) {
-	// Tiny ScopeMaxItems = 3. _events should accept far more than that;
-	// a regular scope should 507 on the 4th item.
+	// Tiny ScopeMaxItems = 3 globally. Use _inbox (which gets its
+	// own MaxItems separate from ScopeMaxItems) as the source of
+	// 10 writes that auto-populate 10 events.
 	h, _ := newReservedScopesTestHandler(t, Config{
 		ScopeMaxItems: 3,
 		MaxStoreBytes: 100 << 20,
 		MaxItemBytes:  1 << 20,
+		Inbox:         InboxConfig{MaxItems: 100},
+		Events:        EventsConfig{Mode: EventsModeFull},
 	})
 
-	// Append 10 items to _events — all must succeed even though
-	// ScopeMaxItems = 3 globally.
+	// 10 writes to _inbox — each auto-populates one event into
+	// _events. _events must accept all 10 even though ScopeMaxItems
+	// = 3 globally; the exemption keeps it gated only by the
+	// store-wide byte budget.
 	for i := 0; i < 10; i++ {
-		body := fmt.Sprintf(`{"scope":"_events","id":"e-%d","payload":{"i":%d}}`, i, i)
+		body := fmt.Sprintf(`{"scope":"_inbox","id":"i-%d","payload":{"i":%d}}`, i, i)
 		code, _, raw := doRequest(t, h, "POST", "/append", body)
 		if code != 200 {
-			t.Fatalf("append #%d to _events: code=%d body=%s (cap exemption broken)", i, code, raw)
+			t.Fatalf("append #%d to _inbox: code=%d body=%s", i, code, raw)
 		}
+	}
+
+	count, _ := eventsTailCount(t, h)
+	if count != 10 {
+		t.Fatalf("_events count=%d want 10 (cap exemption broken: ScopeMaxItems=3 leaked through to _events)", count)
 	}
 
 	// Cross-check: the same store still 507s a user-scope at the 4th
@@ -2799,63 +2845,21 @@ func TestReservedScopes_InboxRespectsCustomItemCount(t *testing.T) {
 	}
 }
 
-// _events's per-item byte cap is derived (MaxItemBytes + 1 KiB envelope
-// slack) so the cap is always at least as wide as any user-write. A
-// payload that's accepted by _events but rejected by user-scope proves
-// _events's cap really is the global cap plus the slack — and a payload
-// past the derived cap is still rejected on _events itself.
+// _events's per-item byte cap derivation (max(MaxItemBytes,
+// Inbox.MaxItemBytes) + 1 KiB envelope slack) is verified via:
 //
-// The test uses a JSON-object payload (not a top-level string)
-// deliberately: top-level JSON-string payloads pre-render at write
-// time and are charged for both the raw bytes AND the decoded form
-// in approxItemSize, so payload-byte arithmetic doubles. Objects
-// skip renderBytes; len(Payload) is the only payload cost the cap
-// sees.
-func TestReservedScopes_EventsDerivedItemBytesCap(t *testing.T) {
-	const globalCap = 8 << 10 // 8 KiB; _events derives globalCap + 1 KiB.
-	// Inbox.MaxItemBytes set BELOW globalCap so the events derivation
-	// max(MaxItemBytes, Inbox.MaxItemBytes) collapses to MaxItemBytes —
-	// otherwise the default 64 KiB inbox cap would dominate and
-	// `_events` would accept much larger payloads than this test
-	// expects. The "Inbox larger than global drives events" case is
-	// covered separately in TestNewStore_DerivesReservedScopeCaps and
-	// TestEvents_AutoPopulate_FullModeNoDropOnLargeInboxWrite.
-	h, _ := newReservedScopesTestHandler(t, Config{
-		ScopeMaxItems: 1000,
-		MaxStoreBytes: 100 << 20,
-		MaxItemBytes:  globalCap,
-		Inbox:         InboxConfig{MaxItemBytes: 1 << 10},
-	})
-
-	// Object payload: `{"d":"<filler>"}` — 8 bytes of JSON framing
-	// plus the filler. Envelope (scope+id+seq+ts+base) adds ~56 B
-	// for the short scope/id strings used here, so 200 B of
-	// headroom is comfortable.
-	mkPayload := func(totalBytes int) string {
-		filler := strings.Repeat("a", totalBytes-8) // -len(`{"d":""}`)
-		return fmt.Sprintf(`{"d":"%s"}`, filler)
-	}
-
-	// Fits _events's derived 9 KiB cap (with envelope ≈ 8556 B), past
-	// the user's 8 KiB cap.
-	logOnly := mkPayload(globalCap + 256)
-
-	body := fmt.Sprintf(`{"scope":"user","id":"big","payload":%s}`, logOnly)
-	if code, _, raw := doRequest(t, h, "POST", "/append", body); code != 400 {
-		t.Errorf("/append user with payload > global cap: code=%d body=%s want 400", code, raw)
-	}
-	body = fmt.Sprintf(`{"scope":"_events","id":"big","payload":%s}`, logOnly)
-	if code, _, raw := doRequest(t, h, "POST", "/append", body); code != 200 {
-		t.Errorf("/append _events with same payload: code=%d body=%s want 200 (within derived cap)", code, raw)
-	}
-
-	// Past _events's derived cap (global + 1 KiB) — even _events says no.
-	overEventsCap := mkPayload(globalCap + (1 << 10) + 256)
-	body = fmt.Sprintf(`{"scope":"_events","id":"too-big","payload":%s}`, overEventsCap)
-	if code, _, raw := doRequest(t, h, "POST", "/append", body); code != 400 {
-		t.Errorf("/append _events with payload past derived cap: code=%d body=%s want 400", code, raw)
-	}
-}
+//   - TestNewStore_DerivesReservedScopeCaps — the field-level
+//     derivation under several Config shapes.
+//   - TestEvents_AutoPopulate_FullModeNoDropOnLargeInboxWrite — the
+//     end-to-end path: a large _inbox /append in EventsModeFull
+//     auto-populates an event that fits the derived cap.
+//
+// Direct /append on _events used to drive a third synthetic check
+// here ("does _events accept a payload past the user's MaxItemBytes
+// but within the derived cap"), but with /append _events now closed
+// the synthetic path is gone. The two coverage points above test
+// the same underlying derivation through the only paths that can
+// still reach it.
 
 // eventsTailCount is a tiny helper for the auto-populate tests that
 // follow: hits /tail on `_events`, asserts the response is OK, and
@@ -3142,12 +3146,16 @@ func TestEvents_AutoPopulate_FullModeNoDropOnLargeInboxWrite(t *testing.T) {
 	}
 }
 
-// Recursion guard: an external /append directly to `_events`
-// (allowed but unusual per RFC §2.6) must
-// NOT trigger the auto-populate machinery to write a SECOND event
-// for "the cache observed the previous write to _events". Without
-// the guard the cache would loop, doubling _events on every
-// external write.
+// External /append on _events is rejected (cache-only, RFC §2.6) and
+// the cache's own auto-populate writes (which DO land in _events)
+// must not recursively trigger more emits. Two assertions:
+//
+//  1. /append _events returns 400 with a "reserved" error — closes
+//     the door on direct app injection.
+//  2. N user-scope /appends with EventsModeFull produce exactly N
+//     entries in _events, not 2N. The recursion guard in
+//     eventsEnabled bails on Scope == EventsScopeName so the
+//     cache's emit-into-_events does not retrigger emit.
 func TestEvents_AutoPopulate_RecursionGuard(t *testing.T) {
 	h, _ := newReservedScopesTestHandler(t, Config{
 		ScopeMaxItems: 100,
@@ -3156,14 +3164,26 @@ func TestEvents_AutoPopulate_RecursionGuard(t *testing.T) {
 		Events:        EventsConfig{Mode: EventsModeFull},
 	})
 
+	// (1) Direct /append on _events is rejected.
 	body := `{"scope":"_events","id":"manual","payload":{"v":1}}`
-	if code, _, raw := doRequest(t, h, "POST", "/append", body); code != 200 {
-		t.Fatalf("/append _events: code=%d body=%s", code, raw)
+	code, out, raw := doRequest(t, h, "POST", "/append", body)
+	if code != 400 {
+		t.Fatalf("/append _events: code=%d body=%s want 400 (cache-only)", code, raw)
+	}
+	if errStr, _ := out["error"].(string); !strings.Contains(errStr, "reserved") {
+		t.Errorf("/append _events error=%q does not mention 'reserved'", errStr)
 	}
 
-	// Exactly 1 entry — the manual write — and zero auto-populated.
-	if count, _ := eventsTailCount(t, h); count != 1 {
-		t.Errorf("recursion guard broken: _events count=%d want 1 (only the manual write)", count)
+	// (2) N user-scope writes produce exactly N events, not 2N.
+	const N = 5
+	for i := 0; i < N; i++ {
+		userBody := fmt.Sprintf(`{"scope":"posts","id":"p-%d","payload":{"v":%d}}`, i, i)
+		if code, _, raw := doRequest(t, h, "POST", "/append", userBody); code != 200 {
+			t.Fatalf("/append posts #%d: code=%d body=%s", i, code, raw)
+		}
+	}
+	if count, _ := eventsTailCount(t, h); count != N {
+		t.Errorf("recursion guard broken: %d user writes produced %d _events entries (want %d)", N, count, N)
 	}
 }
 
