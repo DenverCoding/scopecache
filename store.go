@@ -287,6 +287,7 @@ func (s *store) initReservedScopes() {
 		if _, exists := sh.scopes[name]; !exists {
 			buf := s.newscopeBuffer()
 			buf.maxItems = s.maxItemsFor(name)
+			buf.maxItemBytes = s.maxItemBytesFor(name)
 			buf.lastWriteTS = 0 // bootstrap: no writes yet
 			sh.scopes[name] = buf
 			s.totalBytes.Add(scopeBufferOverhead)
@@ -309,6 +310,7 @@ func (s *store) initReservedScopesLocked() {
 		}
 		buf := s.newscopeBuffer()
 		buf.maxItems = s.maxItemsFor(name)
+		buf.maxItemBytes = s.maxItemBytesFor(name)
 		buf.lastWriteTS = s.lastWriteTS.Load() // align with surrounding event
 		sh.scopes[name] = buf
 		s.totalBytes.Add(scopeBufferOverhead)
@@ -490,6 +492,7 @@ const scopeBufferOverhead = 1024
 func (s *store) newscopeBuffer() *scopeBuffer {
 	b := newscopeBuffer(s.defaultMaxItems)
 	b.store = s
+	b.maxItemBytes = s.maxItemBytes
 	return b
 }
 

@@ -268,8 +268,12 @@ func (b *scopeBuffer) insertNewItemLocked(item Item, nowUs int64) (Item, error) 
 		// invariant. The external write path's checkItemSize already
 		// rejected oversized items, so this fires either as
 		// defense-in-depth or as the canonical gate for trusted writes.
-		if itemCap := b.store.maxItemBytesFor(item.Scope); size > itemCap {
-			return Item{}, fmt.Errorf("item size %d exceeds per-item cap %d for scope %q", size, itemCap, item.Scope)
+		// b.maxItemBytes is cached at scope-create time so the check
+		// is a single int64 compare under b.mu — a method-call dispatch
+		// here amplified into ~15% RPS loss on contended-scope hot
+		// paths via lock-hold-time queueing.
+		if size > b.maxItemBytes {
+			return Item{}, fmt.Errorf("item size %d exceeds per-item cap %d for scope %q", size, b.maxItemBytes, item.Scope)
 		}
 		ok, current, max := b.store.reserveBytes(size)
 		if !ok {
