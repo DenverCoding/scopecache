@@ -132,9 +132,9 @@ func validateIDOrSeq(endpoint, id string, seq uint64) error {
 	return nil
 }
 
-// validatePayload enforces the two-part payload contract (RFC §4.1):
-// payload must be present (not missing, not literal `null`) and must
-// be syntactically valid JSON.
+// validatePayload enforces the three-part payload contract (RFC
+// §4.1): payload must be present (not missing, not literal `null`),
+// must be syntactically valid JSON, and must be valid UTF-8.
 //
 // The HTTP path's encoding/json decode catches malformed JSON during
 // the structural scan that populates RawMessage, but direct Gateway
@@ -142,14 +142,24 @@ func validateIDOrSeq(endpoint, id string, seq uint64) error {
 // in as-is. Without the explicit json.Valid check, invalid bytes
 // would be stored opaquely and re-served by /get, /head, /tail,
 // /render and `_events` envelopes, breaking any downstream consumer
-// that json.Unmarshals. json.Valid is a single linear scan and runs
-// only on writes.
+// that json.Unmarshals.
+//
+// The UTF-8 check closes the same round-trip-corruption hazard
+// checkKeyField guards on scope/id: json.Valid accepts a bare 0x80
+// inside a JSON string (it's syntactically a string), but on
+// re-marshal encoding/json silently rewrites those bytes to U+FFFD
+// — input "\x80" comes back as "�" on the next /get. Both checks
+// are linear scans; json.Valid runs first as the cheaper structural
+// gate.
 func validatePayload(p json.RawMessage) error {
 	if len(p) == 0 || bytes.Equal(bytes.TrimSpace(p), []byte("null")) {
 		return errors.New("the 'payload' field is required")
 	}
 	if !json.Valid(p) {
 		return errors.New("the 'payload' field must be a valid JSON value")
+	}
+	if !utf8.Valid(p) {
+		return errors.New("the 'payload' field must be valid UTF-8")
 	}
 	return nil
 }

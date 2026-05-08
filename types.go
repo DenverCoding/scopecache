@@ -242,10 +242,13 @@ func (m MB) MarshalJSON() ([]byte, error) {
 }
 
 // Item is the on-the-wire shape of a cached entry. Payload is
-// json.RawMessage: the cache stores it as opaque bytes and does not
-// parse arbitrary user payloads except on documented paths
-// (renderBytes precompute for JSON-string shortcuts in /render,
-// counter parsing in /counter_add).
+// json.RawMessage: the cache stores it as opaque bytes (no parsing
+// of arbitrary user content) but enforces three wire-level
+// invariants on the raw bytes — must be syntactically valid JSON,
+// must be valid UTF-8, and must not be empty or literal `null`.
+// Documented inspection paths beyond those invariants:
+// renderBytes precompute for JSON-string shortcuts in /render,
+// and counter parsing in /counter_add.
 //
 // Ts is cache-owned (time.Now().UnixMicro()) and refreshed on every
 // write that touches the item; clients must not supply ts (400 on

@@ -175,6 +175,57 @@ func TestValidateWriteItem_RejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+// json.Valid accepts a bare high byte inside a JSON string token —
+// `"\x80"` is syntactically a 3-byte string. encoding/json then
+// silently rewrites the malformed byte to U+FFFD on Unmarshal so a
+// /get round-trip would corrupt the payload. validatePayload
+// therefore runs utf8.Valid as a second gate after json.Valid;
+// these cases lock it in.
+func TestValidateWriteItem_RejectsInvalidUTF8Payload(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload json.RawMessage
+	}{
+		{"bare continuation byte in string", json.RawMessage("\"hello\x80world\"")},
+		{"truncated multi-byte sequence", json.RawMessage("\"\xc3\"")},
+		{"invalid UTF-8 surrogate", json.RawMessage("\"\xed\xa0\x80\"")},
+		{"high byte in object value", json.RawMessage("{\"k\":\"\xff\"}")},
+		{"high byte in array element", json.RawMessage("[\"\x80\"]")},
+	}
+	for _, tc := range cases {
+		item := Item{Scope: "s", Payload: tc.payload}
+		err := validateWriteItem(&item, "/append", MaxItemBytes)
+		if err == nil {
+			t.Errorf("%s: expected rejection", tc.name)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("%s: err=%v not wrapped with ErrInvalidInput", tc.name, err)
+		}
+	}
+}
+
+// Properly-escaped non-ASCII content (\uXXXX or valid UTF-8 multi-
+// byte sequences) must still pass — the gate rejects malformed
+// bytes, not non-ASCII content.
+func TestValidateWriteItem_AcceptsValidUTF8Payload(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload json.RawMessage
+	}{
+		{"escaped unicode", json.RawMessage(`"ÿ"`)},
+		{"raw multi-byte UTF-8", json.RawMessage(`"café"`)},
+		{"emoji", json.RawMessage(`"hi 👋"`)},
+		{"object with multi-byte values", json.RawMessage(`{"k":"naïve","n":42}`)},
+	}
+	for _, tc := range cases {
+		item := Item{Scope: "s", Payload: tc.payload}
+		if err := validateWriteItem(&item, "/append", MaxItemBytes); err != nil {
+			t.Errorf("%s: unexpectedly rejected: %v", tc.name, err)
+		}
+	}
+}
+
 // Same rejection contract for the upsert path: malformed JSON via
 // Gateway.Upsert must fail at the validator, not silently store broken
 // bytes that future /get on (scope, id) returns to clients.
