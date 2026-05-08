@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/VeloxCoding/scopecache"
+	"github.com/VeloxCoding/scopecache/addons/guarded"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
@@ -123,6 +124,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	h.api = scopecache.NewAPI(gw, scopecache.APIConfig{})
 	h.mux = http.NewServeMux()
 	h.api.RegisterRoutes(h.mux)
+	guarded.RegisterRoutes(h.mux, gw)
 
 	// Run init before subscribers so init-created `_events` noise is
 	// wiped before drains start. Provision blocks until the script

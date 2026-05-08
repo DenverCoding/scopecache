@@ -23,6 +23,7 @@ COPY go.mod ./
 COPY *.go ./
 COPY cmd ./cmd
 COPY caddymodule ./caddymodule
+COPY addons ./addons
 
 RUN xcaddy build v2.11.2 \
     --with github.com/VeloxCoding/scopecache=/src \

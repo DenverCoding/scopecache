@@ -54,6 +54,7 @@ import (
 	"time"
 
 	"github.com/VeloxCoding/scopecache"
+	"github.com/VeloxCoding/scopecache/addons/guarded"
 )
 
 // maxEnvConfig{MB,KB,Sec} are the upper bounds beyond which a later
@@ -356,6 +357,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
+	guarded.RegisterRoutes(mux, gw)
 
 	// HTTP timeouts sized for a local AF_UNIX cache: generous enough
 	// for /rebuild bodies that approach the store cap, strict enough

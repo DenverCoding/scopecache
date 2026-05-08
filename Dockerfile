@@ -3,6 +3,7 @@ WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
 COPY cmd ./cmd
+COPY addons ./addons
 RUN CGO_ENABLED=0 go build -o /out/scopecache ./cmd/scopecache
 
 FROM alpine:latest
