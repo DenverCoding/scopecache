@@ -32,43 +32,19 @@ top of the core's public Go API.
 
 ## Quickstart
 
-**As a Caddy module** (TCP):
+Caddy with scopecache baked in, served on `localhost:8081`:
 
 ```bash
-xcaddy build --with github.com/VeloxCoding/scopecache/caddymodule@latest
-```
-
-```caddyfile
-:8080 {
-    scopecache {
-        scope_max_items 100000
-        max_store_mb    100
-        max_item_mb     1
-    }
-    respond 404
-}
-```
-
-**As a standalone binary** (Unix socket, no Caddy):
-
-```bash
-docker compose up -d --build scopecache
-docker compose exec scopecache curl --unix-socket /run/scopecache.sock http://localhost/help
-```
-
-The socket lives inside the container; the second line shells in to
-hit it. The image already includes `curl` so no extra setup is needed.
-
-**To try the Caddy + scopecache combo locally** (no `xcaddy` install):
-
-```bash
+git clone https://github.com/VeloxCoding/scopecache.git
+cd scopecache
 docker compose up -d --build caddyscope
 curl http://localhost:8081/help
 ```
 
-The demo Caddyfile is in
-[deploy/Caddyfile.caddyscope](deploy/Caddyfile.caddyscope); the
-xcaddy build recipe is in
+The bundled Caddyfile is in
+[deploy/Caddyfile.caddyscope](deploy/Caddyfile.caddyscope) — copy
+it as the starting point for your own deployment. The xcaddy
+build recipe lives in
 [Dockerfile.caddyscope](Dockerfile.caddyscope).
 
 ## Performance
