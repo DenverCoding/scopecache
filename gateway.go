@@ -105,9 +105,14 @@ func (g *Gateway) DeleteScope(scope string) (int, bool, error) {
 	return g.store.deleteScope(scope)
 }
 
-// Wipe removes every user-managed scope and resets the byte counter.
-// Returns (scope_count, total_items, freed_bytes).
-// Reserved scopes (`_events`, `_inbox`) are immediately re-created.
+// Wipe drops every scope (user-managed AND reserved) and resets the
+// byte counter, then re-creates the reserved scopes (`_events`,
+// `_inbox`) under the same all-shard write lock so subscribers do
+// not observe a gap.
+// Returns (scope_count, total_items, freed_bytes) reflecting the
+// pre-wipe state across ALL scopes — the just-dropped reserved
+// scopes count toward these totals. A freshly-booted store wiped
+// immediately therefore returns (2, 0, 2 * scopeBufferOverhead).
 func (g *Gateway) Wipe() (int, int, int64) {
 	return g.store.wipe()
 }
