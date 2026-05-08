@@ -246,6 +246,34 @@ func TestConfig_WithDefaults_EventsModeStaysOff(t *testing.T) {
 	}
 }
 
+// A pure Go-API caller can construct EventsMode with any int value.
+// Without WithDefaults clamping unknown values back to Off, an
+// out-of-range mode would land in newStore as-is and behave like
+// Full inside emitEvent (eventsEnabled returns true for anything !=
+// Off; the Notify-payload-strip only fires on the literal
+// EventsModeNotify constant). That silent payload-emit is the
+// privacy-sensitive failure mode the clamp prevents.
+func TestConfig_WithDefaults_ClampsUnknownEventsMode(t *testing.T) {
+	cases := []struct {
+		name string
+		in   EventsMode
+		want EventsMode
+	}{
+		{"recognised: off", EventsModeOff, EventsModeOff},
+		{"recognised: notify", EventsModeNotify, EventsModeNotify},
+		{"recognised: full", EventsModeFull, EventsModeFull},
+		{"out-of-range high", EventsMode(99), EventsModeOff},
+		{"out-of-range negative", EventsMode(-1), EventsModeOff},
+	}
+	for _, tc := range cases {
+		got := Config{Events: EventsConfig{Mode: tc.in}}.WithDefaults()
+		if got.Events.Mode != tc.want {
+			t.Errorf("%s: WithDefaults().Events.Mode = %d, want %d",
+				tc.name, got.Events.Mode, tc.want)
+		}
+	}
+}
+
 // NewStore derives the reserved-scope caps from the resolved Config.
 // Pinning these in a dedicated test means a future refactor of
 // eventsItemEnvelopeOverhead, the inbox-default unit, or the

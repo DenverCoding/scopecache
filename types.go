@@ -55,19 +55,21 @@ const (
 	// SCOPECACHE_INBOX_MAX_ITEM_KB (integer KiB).
 	InboxMaxItemBytes = 64 << 10
 
-	// eventsItemEnvelopeOverhead is the slack added to the user-facing
-	// MaxItemBytes to derive the `_events` scope's per-item cap. An
-	// event entry wraps the user payload in a JSON envelope (op,
+	// eventsItemEnvelopeOverhead is the slack added to the largest
+	// upstream user-cap to derive the `_events` scope's per-item cap.
+	// An event entry wraps the user payload in a JSON envelope (op,
 	// scope, id?, seq, ts, plus framing); 1 KiB is generous over the
 	// actual ~150 B of envelope so future field additions don't force
 	// a knob bump.
 	//
-	// `_events`'s per-item cap is derived (`MaxItemBytes +
-	// eventsItemEnvelopeOverhead`), not exposed as a knob: an event
-	// entry must always be at least as wide as the user-write that
-	// produced it, otherwise large user-writes would 507 on the
-	// auto-populate path. Operators tune `MaxItemBytes`; `_events`
-	// follows.
+	// `_events`'s per-item cap is derived as
+	// `max(MaxItemBytes, Inbox.MaxItemBytes) + eventsItemEnvelopeOverhead`
+	// in newStore, not exposed as a knob: an event entry must always
+	// be at least as wide as the largest user-write that could
+	// produce it, otherwise an Inbox configured with
+	// MaxItemBytes > MaxItemBytes would silently drop its events on
+	// the auto-populate path. Operators tune the upstream caps;
+	// `_events` follows.
 	eventsItemEnvelopeOverhead = 1024
 
 	// EventsScopeName is the reserved scope name for the auto-populated
@@ -115,9 +117,11 @@ const (
 //
 // `_events` is exempt from ScopeMaxItems (observability; byte-cap
 // only) and derives its per-item cap from
-// MaxItemBytes + eventsItemEnvelopeOverhead. `_inbox` uses the
-// operator-tunable Inbox.{MaxItems,MaxItemBytes} independently of
-// the user-scope caps.
+// `max(MaxItemBytes, Inbox.MaxItemBytes) + eventsItemEnvelopeOverhead`
+// — the max() is what keeps a large `_inbox` write from silently
+// dropping its event when `Inbox.MaxItemBytes > MaxItemBytes`.
+// `_inbox` itself uses the operator-tunable Inbox.{MaxItems,
+// MaxItemBytes} independently of the user-scope caps.
 type Config struct {
 	ScopeMaxItems int
 	MaxStoreBytes int64
@@ -209,6 +213,15 @@ type InboxConfig struct {
 // MaxStoreBytes is also clamped up to reservedScopesOverhead so the
 // reserved scopes always fit at boot — only fires for absurdly
 // small caps (under 2 KiB), realistic MB/GB caps are untouched.
+//
+// Events.Mode outside the recognised range (Off / Notify / Full)
+// gets clamped to Off. The HTTP and env-var parsers reject unknown
+// strings via ParseEventsMode, but a pure Go-API caller could pass
+// an out-of-range int value directly. Defaulting silently to Off is
+// the safe call: the alternative — letting an unrecognised value
+// fall through to the "anything not Off is Full" branch in
+// emitEvent — would silently emit events with payload, the most
+// privacy-sensitive mode.
 func (c Config) WithDefaults() Config {
 	if c.ScopeMaxItems <= 0 {
 		c.ScopeMaxItems = ScopeMaxItems
@@ -227,6 +240,12 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.Inbox.MaxItemBytes <= 0 {
 		c.Inbox.MaxItemBytes = int64(InboxMaxItemBytes)
+	}
+	switch c.Events.Mode {
+	case EventsModeOff, EventsModeNotify, EventsModeFull:
+		// recognised
+	default:
+		c.Events.Mode = EventsModeOff
 	}
 	return c
 }
