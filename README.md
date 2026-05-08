@@ -52,12 +52,23 @@ xcaddy build --with github.com/VeloxCoding/scopecache/caddymodule@latest
 **As a standalone binary** (Unix socket, no Caddy):
 
 ```bash
-docker compose up --build scopecache
-curl --unix-socket /run/scopecache.sock http://localhost/help
+docker compose up -d --build scopecache
+docker compose exec scopecache curl --unix-socket /run/scopecache.sock http://localhost/help
 ```
 
-A working Caddy + scopecache demo is in
-[deploy/Caddyfile.caddyscope](deploy/Caddyfile.caddyscope) and
+The socket lives inside the container; the second line shells in to
+hit it. The image already includes `curl` so no extra setup is needed.
+
+**To try the Caddy + scopecache combo locally** (no `xcaddy` install):
+
+```bash
+docker compose up -d --build caddyscope
+curl http://localhost:8081/help
+```
+
+The demo Caddyfile is in
+[deploy/Caddyfile.caddyscope](deploy/Caddyfile.caddyscope); the
+xcaddy build recipe is in
 [Dockerfile.caddyscope](Dockerfile.caddyscope).
 
 ## Performance
