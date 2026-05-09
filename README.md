@@ -4,9 +4,8 @@ ScopeCache is a in-memory publish cache and write buffer.
 
 It works standalone over plain HTTP, for example over a Unix socket, from any programming language. But it is designed to shine as a Caddy module: when installed inside Caddy, ScopeCache runs in the same process as the webserver, allowing Caddy to serve ScopeCache data directly from memory.
 
-This avoids the usual request path through separate application and storage processes — such as PHP, Node.js, Redis, or a database — on every request. In benchmark tests, this direct in-process path served data about 7× faster than routing the same request through Node.js and Redis, even though all services were installed on the same server.
-
-That is the core trade-off: ScopeCache is intentionally narrower, but by removing separate application and storage services from the request path, it can reach a latency and throughput profile that traditional multi-service request paths cannot realistically match.
+This avoids the usual request path through separate application and storage processes on requests, such as PHP, Node.js, Redis, or a database. In benchmark tests, this direct in-process path served data about 7× faster than routing the same request through Node.js and Redis, even though all services were installed on the same server.
+By removing separate application and storage services from the request path, it can reach a latency and throughput profile that traditional multi-service request paths cannot realistically match.
 
 ScopeCache deliberately keeps filtering limited. The core only addresses a few official top-level fields, which keeps it robust, predictable, and fast. But because scope names and IDs are plain strings, ScopeCache remains flexible enough for many real-world use cases.
 
