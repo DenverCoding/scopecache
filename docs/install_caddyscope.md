@@ -1,5 +1,11 @@
 # Install Caddy + scopecache on a fresh VPS
 
+This guide walks through a minimal install of Caddy with the
+scopecache module on a fresh Ubuntu/Debian VPS, intended for
+evaluation and benchmarking. The installer is a single shell
+command; a companion benchmark script verifies end-to-end behaviour
+under load.
+
 One line on a fresh Ubuntu/Debian VPS:
 
 ```bash
@@ -11,12 +17,7 @@ When that finishes:
 - Caddy + scopecache is running on `:80`.
 - The systemd unit `caddy.service` auto-starts on reboot and restarts
   on crash.
-- `/help` has been smoke-tested.
 - `wrk` is installed (for the benchmark step below).
-
-The script does **not** run `apt upgrade` — that's the operator's
-decision, not the installer's. Run `sudo apt upgrade` separately if
-you want a full system upgrade first.
 
 ## Configuration
 
