@@ -76,9 +76,11 @@ DEBIAN_FRONTEND=noninteractive apt-get -y -qq -o Dpkg::Options::=--force-confdef
 
 if [ "$VERSION" = "latest" ]; then
     # GitHub redirects /releases/latest to the newest tag URL; the tag
-    # is the trailing path component. -o /dev/null + -w %{redirect_url}
-    # avoids downloading the page body.
-    VERSION=$(curl -fsSL -o /dev/null -w '%{redirect_url}' \
+    # is the trailing path component. NOTE: do NOT pass -L here — once
+    # curl follows the redirect, the final request is no longer a
+    # redirect and %{redirect_url} comes back empty. We want the raw
+    # 302 Location header.
+    VERSION=$(curl -fsS -o /dev/null -w '%{redirect_url}' \
         "https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest" \
         | sed 's|.*/tag/||')
     if [ -z "$VERSION" ]; then
