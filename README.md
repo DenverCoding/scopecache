@@ -1,8 +1,8 @@
 # scopecache
 
-ScopeCache is an in-memory publish cache and write buffer.
+ScopeCache is an in-memory cache that runs inside Caddy. It lets Caddy serve selected dynamic reads directly from memory. This can reduce pressure on both the database and application layer.
 
-It works standalone over plain HTTP, for example over a Unix socket, from any programming language. But it is designed to shine as a Caddy module: when installed inside Caddy, ScopeCache runs in the same process as the webserver, allowing Caddy to serve ScopeCache data directly from memory.
+ScopeCache works standalone over plain HTTP, for example over a Unix socket, from any programming language. But it is designed to shine as a Caddy module: when installed inside Caddy, ScopeCache runs in the same process as the webserver, allowing Caddy to serve ScopeCache data directly from memory.
 
 This avoids the usual request path through separate application and storage processes on requests, such as PHP, Node.js, Redis, or a database. In benchmark tests, this direct in-process path served data about 7× faster than routing the same request through Node.js and Redis, even though all services were installed on the same server.
 
@@ -28,7 +28,7 @@ ScopeCache can also act as a write buffer, with built-in support for change noti
 
 ScopeCache targets workloads where an application needs a hot, scope-addressed views in memory rather than a full general-purpose datastore. Examples include latest thread messages, unread counters, inbox views, view counts, rate-limit buckets, pre-rendered HTML fragments for HTMX-driven interfaces, and small materialized views.
 
-Redis is excellent software, but for these narrow patterns it can be more infrastructure than the workload requires. ScopeCache is built for cases where the cache can safely be disposable, rebuilt from the source of truth, and served directly from the web server process. Because ScopeCache runs inside Caddy, cache reads can be served directly from the web server process. For suitable hot-read paths, this can remove the need for a separate cache service and reduce pressure on the application runtime, resulting in fewer moving parts, lower resource usage, and higher HTTP throughput. Redis is typically used in order to reduce pressure on the database, but requests still pass through the application layer. ScopeCache can reduce pressure on both the database and the application layer, because suitable cache reads can be served directly by Caddy.
+Redis is excellent software, but for these narrow patterns it can be more infrastructure than the workload requires. ScopeCache is built for cases where the cache can safely be disposable, rebuilt from the source of truth, and served directly from the webserver process. Because ScopeCache runs inside Caddy, cache reads can be served directly from the webserver process. For suitable hot-read paths, this can remove the need for a separate cache service and reduce pressure on the application runtime, resulting in fewer moving parts, lower resource usage, and higher HTTP throughput. Redis is typically used in order to reduce pressure on the database, but requests still pass through the application layer. ScopeCache can reduce pressure on both the database and the application layer, because suitable cache reads can be served directly by Caddy.
 
 The second reason ScopeCache exists is [FrankenPHP](https://frankenphp.dev/).
 
