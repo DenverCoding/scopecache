@@ -2295,6 +2295,10 @@ their net byte delta on this counter before taking the per-scope
 lock, so an over-cap write fails fast without acquiring the scope
 mutex.
 
+For the read-side performance characteristics of these locks
+(per-scope read-lock concurrency, throughput plateau, and the
+rationale for `sync.RWMutex` over `sync.Mutex`), see §8.4.
+
 ### 8.2 Durability contract
 
 A `200 OK` response from any write endpoint confirms the write was
@@ -2341,6 +2345,68 @@ are internally consistent at the moment of the read.
 Operators using `/stats` to drive decisions (capacity planning,
 admission-control headroom) should treat its output as approximate
 rather than transactional.
+
+### 8.4 Lookup performance
+
+Inside a single scope buffer, every read path (`/get`, `/head`,
+`/tail`, `/render`) hits the same set of structures:
+
+- An append-oriented `items` slice (the canonical store).
+- A `bySeq` map from `seq` to slice index — drives `/get?seq=…`.
+- A `byID` map from `id` to slice index — drives `/get?id=…`
+  and `/render`.
+- Per-scope counters (`lastSeq`, `bytes`, `lastWriteTS`, …).
+
+A request such as `GET /get?scope=X&seq=N` resolves in three
+steps: a top-level shard-map lookup to find the scope buffer, a
+hash-map lookup on the scope's `bySeq` index, and an array index
+into the items slice. Each step is O(1) on average, independent
+of scope size.
+
+Single-thread benchmarks on a desktop-class CPU (AMD Ryzen AI
+Max+ 395 with 32 GB LPDDR5X-8000) measure:
+
+- ~**43 ns** per `getBySeq` call.
+- ~**23 million lookups per second** on a single CPU core.
+
+Reads share the per-scope `sync.RWMutex` read-lock so multiple
+lookups within the same scope run concurrently. Aggregate
+throughput on an 8-core saturated workload reaches ~**77 million
+lookups per second** (~**13 ns per lookup**) on the same
+hardware. Beyond that point, read-lock atomic-counter contention
+on a single cache line prevents further linear scaling — adding
+cores past 8 yields only marginal additional throughput.
+
+#### Why `sync.RWMutex` and not `sync.Mutex`
+
+The scope buffer mutates several structures (`items`, `bySeq`,
+`byID`, counters) sequentially within a single write. A reader
+that observes mid-write state would see:
+
+- An entry in `items` that has not yet been indexed in `bySeq` —
+  the lookup would incorrectly report the item as missing.
+- A Go map mid-rehash — the runtime aborts the program with a
+  fatal `concurrent map read and map write`.
+- Counters in inconsistent intermediate states (`lastSeq` updated
+  before `bytes`, etc).
+
+A plain `sync.Mutex` would prevent these hazards but would also
+serialise all readers, eliminating concurrent reads entirely.
+For a read-heavy workload that is unacceptable. `sync.RWMutex`
+is the cheapest coordination primitive that allows multiple
+readers to hold the lock simultaneously while still excluding
+writers — it matches the cache's expected access pattern
+(high-concurrency reads, occasional writes).
+
+The cost is the read-lock's atomic-counter contention at very
+high concurrency (the plateau noted above). Lock-free
+alternatives — immutable snapshots behind an `atomic.Pointer`,
+per-CPU read counters, hand-written CAS-based hash maps — exist,
+each with their own trade-offs in write cost, memory cost, and
+implementation complexity. They are explicitly out of scope for
+the v1.0 core; revisiting the read-lock plateau is a candidate
+optimisation for later versions if measurement shows it limits
+real workloads.
 
 ---
 
