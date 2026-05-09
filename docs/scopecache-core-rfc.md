@@ -2404,10 +2404,21 @@ alongside these.
 
 `bySeq` and `byID` store `Item` **values**, not pointers and not
 indexes into the slice. Every write therefore places the same item
-in three places (items slice, `byID`, `bySeq`) — each as a separate
-copy.
+struct in three places (items slice, `byID`, `bySeq`).
 
-- Memory cost: roughly threefold per item.
+The `Item` struct is small — five exported fields plus two
+unexported, ~104 bytes total. The `Payload` field inside it is a
+`json.RawMessage` (a `[]byte` slice header: pointer + length +
+capacity, 24 bytes), and **only that header is duplicated**; the
+underlying payload bytes live on the heap and all three slice
+headers point at the same backing array. A 1 MB payload is stored
+exactly once, not three times.
+
+- Memory cost per item: ~80 bytes of duplicated struct overhead
+  on top of the single shared payload allocation. For large
+  payloads the overhead is negligible (~0.03 % at 1 MB); for tiny
+  100-byte payloads the per-item structs can outweigh the payload
+  itself.
 - Lookup cost: minimal — `b.bySeq[N]` is a single hash-map load
   with no further indirection. The items slice is never touched
   for a `/get?seq=` or `/get?id=` query.

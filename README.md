@@ -30,6 +30,25 @@ ScopeCache can also act as a write buffer, with built-in support for change noti
 As stated above, ScopeCache is a in-memory publish cache and write buffer. It can hold a slice of your data in RAM in front of your presistent data store. Items live inside *scopes* — what other systems call a namespace or bucket — and are addressable only by `scope`, `id`, or `seq`. The entire cache is wipeable and rebuildable from the source of
 truth at any time. 
 
+Because scope names and IDs are plain strings, ScopeCache remains flexible without adding a query language. The application can encode its own domain model into names such as:
+
+```text
+thread:34                    -> latest messages or reactions in a thread
+user:42:inbox                -> private inbox data for one user
+tenant:acme:thread:34        -> thread data scoped to one tenant
+article:hello-world:comments -> comments for one article
+chat:user:42:user:77         -> messages in a private chat
+counter:thread:34            -> counters for one thread
+```
+
+Item IDs are optional. ScopeCache automatically assigns a `seq` value to every item, so items can always be ordered and addressed by sequence.
+
+Optional IDs let the application give items a stable, meaningful name, such as `reaction:884`, `comment:102`, `notification:183`, `views`, or `likes`.
+
+ScopeCache treats both scope names and IDs as plain strings. It does not inspect or filter on parts of the ID, but meaningful IDs make it easy for the application to address, update, delete, or organize items.
+
+ScopeCache deliberately keeps filtering limited. It will not grow into a query engine. Flexibility comes from creating materialized views of your data: the application prepares the views that clients need and stores them under separate, purpose-specific scopes such as `thread:34`, `user:42:inbox`, or `user:42:unread`.
+
 ScopeCache has three main use cases:
 
 - **Read cache.** Keep highly dynamic, private, or user-specific data in memory so reads do not have to hit the database on every request.
@@ -37,9 +56,8 @@ ScopeCache has three main use cases:
   ScopeCache stores application-defined data under scopes and IDs. That makes it useful for things like new chat messages for a specific user, the latest reactions in a thread, private inbox data, counters, notifications, or API responses that depend on application state.
 - **Write buffer.** Append high-frequency events (analytics hits, log   lines, chat messages); A background worker drains the buffer in batches via `/tail` + `/delete_up_to` and can process it further. A subscription model is implemented, ScopeCache can publish notifications to a listener (a script that processes the data)
 - **Write buffer.** ScopeCache can buffer high-frequency events such as analytics hits, log lines, or chat messages. A background worker can drain the buffer in batches using `/tail` and `/delete_up_to`, then process, persist, or forward the data elsewhere. ScopeCache also includes a subscription model for change notifications, so an external script or worker can be notified when new data is available for processing.
-  - **Fronting proxy.** A webserver with scopecache can serve cached HTML, JSON, or XML directly from `/render`, without involving the application layer.
-  This may look similar to an HTTP response cache, but the model is different: ScopeCache does not cache responses based on incoming requests. Instead, your application precomputes the content, stores it under a scope and ID, and the proxy serves that content directly when requested. Precomputed content can also be written to static files, but that becomes less convenient when data changes frequently. File writes need coordination, atomic replacement, and careful handling of concurrent readers and writers.
-  ScopeCache avoids that by keeping dynamic precomputed data in memory, with sharded locking so updates and appends only affect the relevant scope for a couple of nanoseconds.
+- **Fronting proxy.** A webserver with scopecache can serve cached HTML, JSON, or XML directly from `/render`, without involving the application layer. This may look similar to an HTTP response cache, but the model is different: ScopeCache does not cache responses based on incoming requests. Instead, your application precomputes the content, stores it under a scope and ID, and the proxy serves that content directly when requested. Precomputed content can also be written to static files, but that becomes less convenient when data changes frequently. File writes need coordination, atomic replacement, and careful handling of concurrent readers and writers.
+ScopeCache avoids that by keeping dynamic precomputed data in memory, with sharded locking so updates and appends only affect the relevant scope for a couple of nanoseconds.
 
 ScopeCache provides two built-in convenience mechanisms around the core:
 
@@ -55,7 +73,7 @@ Apart from the two convenience features mentioned above, the core is intentional
 
 ### ScopeCache 'internals'
 
-ScopeCache deliberately limits filtering to three axes: `scope`, `id`, and `seq`. There is no query language, no joins, and no payload inspection.
+ScopeCache deliberately limits filtering to three axes: `scope`, `id`, and `seq`. There is no query language, no joins, and no payload inspection (apart from JSON + UTF-8 validity checks at write time).
 
 Internally, the top-level store is a 32-shard map keyed by scope name. A write may briefly touch a shard-level lock to find the
 scope, but after that the operation is handled by the scope's own buffer. That means unrelated scopes do not block each other during the actual data mutation.
@@ -88,7 +106,6 @@ For example, an authorization addon can validate a bearer token, map it to the s
 
 So, ScopeCache is built around a modular architecture. Addons interact with the cache through a clear built-in gateway API, instead of reaching directly into the internal core.
 For example, an authorization/access addon had been built that validates a bearer token and then returns only the items from the scopes that token is allowed to access.
-
 
 
 ## Quickstart Docker install
