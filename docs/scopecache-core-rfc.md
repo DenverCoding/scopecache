@@ -2348,20 +2348,84 @@ rather than transactional.
 
 ### 8.4 Lookup performance
 
-Inside a single scope buffer, every read path (`/get`, `/head`,
-`/tail`, `/render`) hits the same set of structures:
+#### The `Item` value
 
-- An append-oriented `items` slice (the canonical store).
-- A `bySeq` map from `seq` to slice index — drives `/get?seq=…`.
-- A `byID` map from `id` to slice index — drives `/get?id=…`
-  and `/render`.
-- Per-scope counters (`lastSeq`, `bytes`, `lastWriteTS`, …).
+The on-the-wire `Item` struct (`types.go`):
 
-A request such as `GET /get?scope=X&seq=N` resolves in three
-steps: a top-level shard-map lookup to find the scope buffer, a
-hash-map lookup on the scope's `bySeq` index, and an array index
-into the items slice. Each step is O(1) on average, independent
-of scope size.
+```go
+type Item struct {
+    Scope   string          `json:"scope,omitempty"`
+    ID      string          `json:"id,omitempty"`
+    Seq     uint64          `json:"seq,omitempty"`
+    Ts      int64           `json:"ts"`
+    Payload json.RawMessage `json:"payload"`
+
+    // Unexported — not part of the wire format:
+    renderBytes []byte        // pre-decoded payload for the /render fast path
+    counter     *atomic.Int64 // non-nil only for items created or promoted by /counter_add
+}
+```
+
+Five exported fields plus two internal. `Payload` is a
+`json.RawMessage` — a `[]byte` holding the original JSON text — so
+the cache treats it as opaque and never parses it, except in two
+specific paths: the `/render` fast-path pre-decode (`renderBytes`)
+and `/counter_add` payload typing.
+
+#### The per-scope buffer
+
+Each scope is a `scopeBuffer` (`buffer.go`):
+
+```go
+type scopeBuffer struct {
+    mu       sync.RWMutex
+    items    []Item                  // ordered canonical store, append-order
+    byID     map[string]Item         // index by id  → Item
+    bySeq    map[uint64]Item         // index by seq → Item
+    lastSeq  uint64                  // last-issued seq for this scope
+    bytes    int64                   // sum of approxItemSize across items
+    maxItems int                     // per-scope item cap
+    // ...
+}
+```
+
+Inside a single scope buffer, items are held in three places at
+once:
+
+- The `items` slice — ordered canonical store, used by `/head`
+  (oldest-first), `/tail` (newest-first), and `/render` for
+  multi-item responses.
+- The `bySeq` map — direct lookup for `/get?scope=X&seq=N`.
+- The `byID` map — direct lookup for `/get?scope=X&id=Y` and
+  `/render?scope=X&id=Y`.
+
+Per-scope counters (`lastSeq`, `bytes`, `lastWriteTS`, …) live
+alongside these.
+
+`bySeq` and `byID` store `Item` **values**, not pointers and not
+indexes into the slice. Every write therefore places the same item
+in three places (items slice, `byID`, `bySeq`) — each as a separate
+copy.
+
+- Memory cost: roughly threefold per item.
+- Lookup cost: minimal — `b.bySeq[N]` is a single hash-map load
+  with no further indirection. The items slice is never touched
+  for a `/get?seq=` or `/get?id=` query.
+
+#### The actual `/get` path
+
+A request such as `GET /get?scope=X&seq=N` resolves in two
+hash-map lookups:
+
+1. Top-level shard-map lookup — find the scope buffer.
+2. `b.bySeq[N]` map lookup — return the `Item` directly.
+
+Both steps are O(1) on average, independent of scope size.
+
+Reads that need ordered traversal (`/head` for oldest-first,
+`/tail` for newest-first) walk the `items` slice instead — the
+maps cannot help when no `seq` or `id` is supplied, so an array
+index into the slice is the relevant operation there.
 
 Single-thread benchmarks on a desktop-class CPU (AMD Ryzen AI
 Max+ 395 with 32 GB LPDDR5X-8000) measure:

@@ -5,7 +5,10 @@ ScopeCache is a in-memory publish cache and write buffer.
 It works standalone over plain HTTP, for example over a Unix socket, from any programming language. But it is designed to shine as a Caddy module: when installed inside Caddy, ScopeCache runs in the same process as the webserver, allowing Caddy to serve ScopeCache data directly from memory.
 
 This avoids the usual request path through separate application and storage processes on requests, such as PHP, Node.js, Redis, or a database. In benchmark tests, this direct in-process path served data about 7× faster than routing the same request through Node.js and Redis, even though all services were installed on the same server.
-By removing separate application and storage services from the request path, it can reach a latency and throughput profile that traditional multi-service request paths cannot realistically match.
+
+Redis - and similar in-memory data stores - are by itself fast. But a typical cache 'read' is not just a Redis memory lookup. The request first moves from the webserver into an application process, where a Redis client sends a command to the Redis process over TCP or a Unix socket. Redis returns the data to the application, which then builds the HTTP response and passes it back to the webserver. ScopeCache avoids this roundtrip by running inside Caddy itself.
+
+By removing separate application and storage services from the request path, ScopeCache can reach a latency and throughput profile that traditional multi-service request paths cannot realistically match.
 
 ScopeCache deliberately keeps filtering limited. The core only addresses a few official top-level fields, which keeps it robust, predictable, and fast. But because scope names and IDs are plain strings, ScopeCache remains flexible enough for many real-world use cases.
 
@@ -22,40 +25,71 @@ ScopeCache is not an HTTP response cache like Varnish or Souin. It is a scope-ad
 ScopeCache can also act as a write buffer, with built-in support for change notifications so external scripts can drain, process, or persist events elsewhere.
 
 
-## What it is
+## What it is: Core features and Addons
 
-Redis is fast. That is not the debate. The issue is the request path around Redis. In a typical setup, every cache read still has to cross multiple process and service boundaries — even when everything runs on the same server:
+As stated above, ScopeCache is a in-memory publish cache and write buffer. It can hold a slice of your data in RAM in front of your presistent data store. Items live inside *scopes* — what other systems call a namespace or bucket — and are addressable only by `scope`, `id`, or `seq`. The entire cache is wipeable and rebuildable from the source of
+truth at any time. 
 
-- webserver
-- application layer (Node.js, Python, PHP, etc.)
-- Redis
-- application layer again
-- response
+ScopeCache has three main use cases:
+
+- **Read cache.** Keep highly dynamic, private, or user-specific data in memory so reads do not have to hit the database on every request.
+  A traditional HTTP response cache like Varnish works well for public responses that can be cached by URL and cache-control rules. But for frequently changing data, private data, or data that depends on application-level permissions, a response cache like Varnish is often less convenient, and sometimes the wrong tool entirely.
+  ScopeCache stores application-defined data under scopes and IDs. That makes it useful for things like new chat messages for a specific user, the latest reactions in a thread, private inbox data, counters, notifications, or API responses that depend on application state.
+- **Write buffer.** Append high-frequency events (analytics hits, log   lines, chat messages); A background worker drains the buffer in batches via `/tail` + `/delete_up_to` and can process it further. A subscription model is implemented, ScopeCache can publish notifications to a listener (a script that processes the data)
+- **Write buffer.** ScopeCache can buffer high-frequency events such as analytics hits, log lines, or chat messages. A background worker can drain the buffer in batches using `/tail` and `/delete_up_to`, then process, persist, or forward the data elsewhere. ScopeCache also includes a subscription model for change notifications, so an external script or worker can be notified when new data is available for processing.
+  - **Fronting proxy.** A webserver with scopecache can serve cached HTML, JSON, or XML directly from `/render`, without involving the application layer.
+  This may look similar to an HTTP response cache, but the model is different: ScopeCache does not cache responses based on incoming requests. Instead, your application precomputes the content, stores it under a scope and ID, and the proxy serves that content directly when requested. Precomputed content can also be written to static files, but that becomes less convenient when data changes frequently. File writes need coordination, atomic replacement, and careful handling of concurrent readers and writers.
+  ScopeCache avoids that by keeping dynamic precomputed data in memory, with sharded locking so updates and appends only affect the relevant scope for a couple of nanoseconds.
+
+ScopeCache provides two built-in convenience mechanisms around the core:
+
+- A build-up script can run automatically when the webserver starts, making it easy to rebuild or warm the cache after a restart.
+- A subscription model can notify external applications or scripts when data changes, so they can drain, process, persist, or otherwise handle incoming data.
+
+Apart from the two convenience features mentioned above, the core is intentionally limited to a small set of HTTP endpoints:
+
+- **Read:** `get`, `head`, `tail`
+- **Write / load:** `append`, `warm`, `rebuild`
+- **Cleanup:** `delete`, `delete_up_to`, `delete_scope`
+- **Observe:** `stats`, `scopelist`
+
+### ScopeCache 'internals'
+
+ScopeCache deliberately limits filtering to three axes: `scope`, `id`, and `seq`. There is no query language, no joins, and no payload inspection.
+
+Internally, the top-level store is a 32-shard map keyed by scope name. A write may briefly touch a shard-level lock to find the
+scope, but after that the operation is handled by the scope's own buffer. That means unrelated scopes do not block each other during the actual data mutation.
+
+Each scope stores items in an append-oriented slice, with two parallel indexes: one keyed by seq, and one keyed by id.
+
+A request such as `GET /get?scope=X&seq=N` resolves in two hash-map lookups: a top-level shard-map lookup to find the scope buffer, then a `bySeq` map lookup that returns the item directly. Both steps are O(1) on average, independent of scope size — about 43 ns per lookup, roughly 23 million per second on a single CPU core. (Ordered traversals such as `/head` and `/tail` walk the `items` slice instead; the maps are unused for those endpoints.)
+
+Reads share a per-scope read-lock so multiple lookups run concurrently. On multicore hardware, aggregate throughput rises to roughly 77 million lookups per second at 8 cores — about 13 ns per lookup — and plateaus there: read-lock contention prevents further linear scaling beyond that point.
+
+That performance is not accidental. It comes from both performance tuning and a deliberately small core: no query language, no joins, no payload inspection, and no application logic in the hot path. ScopeCache stays fast and predictable by rejecting features that would add flexibility at the cost of speed, simplicity, or stability.
+
+This limitation of the core functionality of ScopeCache is intentional: ScopeCache keeps the core small, stable, and predictable, while leaving higher-level behavior to modules and addons. The core and the two features are heavely tested, validated, optimized and benchmarked. 
+
+### Addons
+
+Higher-level behavior — such as multi-tenant gateways, batch dispatchers, write-only ingestion, custom authentication, access control, persistence, or event processing — stays outside the core and can be implemented as separate addon packages.
+
+ScopeCache exposes a single public Go API surface — `*Gateway` — that addons build on top of. Internal types (`*store`, `*scopeBuffer`, and other lowercase identifiers in the core package) are not reachable from outside the package, so addons physically cannot reach into them.
+
+The gateway layer exists for three concrete reasons:
+
+1. **Stable boundary.** The core can rename, reshape, or replace its internal types between versions without breaking any addon that depends only on `*Gateway`. Internals are free to evolve; the contract with addons does not. More importantly, new addons can be built without worrying about ScopeCache's internals — memory sharding, lock discipline, byte-budget accounting, or any other implementation detail below `*Gateway`.
+2. **Defensive cloning.** Every byte slice that crosses the gateway is copied in both directions, so internal buffers can never be mutated by an addon, and an addon's byte slices can never be mutated by the cache. Internal call paths inside the core skip the copy — cloning is a boundary concern, not a per-call tax.
+3. **Uniform validation.** Shape rules (scope length, payload size, JSON validity) live at the `*store` boundary below `*Gateway`, so every entry into the cache — HTTP request or Go API call — passes through the same checks. An addon cannot bypass validation that an HTTP caller faces.
+
+The result: the core stays stable, fast, and predictable, while ScopeCache remains straightforward to extend for application-specific needs.
+
+For example, an authorization addon can validate a bearer token, map it to the scopes that token may access, and then return only the items from those allowed scopes — all without touching anything below `*Gateway`.
+
+So, ScopeCache is built around a modular architecture. Addons interact with the cache through a clear built-in gateway API, instead of reaching directly into the internal core.
+For example, an authorization/access addon had been built that validates a bearer token and then returns only the items from the scopes that token is allowed to access.
 
 
-scopecache holds a hot slice of your data in RAM in front of your real
-data store. Items live inside *scopes* — what other systems call a
-namespace or bucket — and are addressable only by `scope`, `id`, or
-`seq`. The entire cache is wipeable and rebuildable from the source of
-truth at any time. There is no on-disk state, no TTL, no eviction
-policy, no application logic.
-
-Two main use cases:
-
-- **Hot-read cache.** Keep frequently queried fragments in memory so
-  they don't hit the database on every request. A fronting proxy
-  (Caddy, nginx, apache) can serve cached HTML, JSON, or XML straight
-  from `/render` without any application layer in between.
-- **Write buffer.** Append high-frequency events (analytics hits, log
-  lines, chat messages); a background worker drains the buffer in
-  batches via `/tail` + `/delete_up_to`.
-
-The core is intentionally limited to a small set of HTTP endpoints
-(read, write, bulk, observe) and three filter axes (`scope`, `id`,
-`seq`). No query language, no joins, no payload inspection. Anything
-beyond the core — multi-tenant gateways, batch dispatchers, write-only
-ingestion, custom auth — is built as separate add-on sub-packages on
-top of the core's public Go API.
 
 ## Quickstart Docker install
 
