@@ -111,13 +111,31 @@ if step_enabled 2; then
     fi
 
     # Detect the actual seq range present in the scope. /head returns
-    # the oldest items (lowest seqs), /tail the newest (highest seq).
-    # Both are JSON; pull the first "seq":<n> from each via grep + cut
-    # so we don't need jq.
+    # the oldest items, /tail the newest — but /tail's default window
+    # is 1000 items, not 1, so we scan ALL "seq":<n> matches in each
+    # response and pick the extreme. Done in a single awk pass to keep
+    # set -o pipefail happy (a `grep | head -1` pipeline can SIGPIPE
+    # grep on the second match and silently abort the script).
+    seq_extreme() {
+        awk -v mode="$1" '
+            {
+                src = $0
+                while (match(src, /"seq":[0-9]+/)) {
+                    v = substr(src, RSTART + 6, RLENGTH - 6) + 0
+                    if (count++ == 0) { best = v }
+                    else if (mode == "max" && v > best) { best = v }
+                    else if (mode == "min" && v < best) { best = v }
+                    src = substr(src, RSTART + RLENGTH)
+                }
+            }
+            END { if (count > 0) print best }
+        '
+    }
+
     head_resp=$(curl -fsS "${URL}/head?scope=${SCOPE}&limit=1")
     tail_resp=$(curl -fsS "${URL}/tail?scope=${SCOPE}")
-    seq_lo=$(printf '%s' "$head_resp" | grep -oE '"seq":[0-9]+' | head -1 | cut -d: -f2)
-    seq_hi=$(printf '%s' "$tail_resp" | grep -oE '"seq":[0-9]+' | head -1 | cut -d: -f2)
+    seq_lo=$(printf '%s' "$head_resp" | seq_extreme min)
+    seq_hi=$(printf '%s' "$tail_resp" | seq_extreme max)
 
     if [ -z "${seq_lo:-}" ] || [ -z "${seq_hi:-}" ]; then
         echo "step 2: could not read seq range from ${URL} (scope=${SCOPE} empty?)" >&2
