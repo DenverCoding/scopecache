@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+env:
+  # Caddy version that the bundled caddyscope binaries are built against.
+  # Keep in sync with Dockerfile.caddyscope.
+  CADDY_VERSION: v2.11.2
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -21,21 +26,35 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Install xcaddy
+        run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
       - name: Build static binaries
         run: |
           mkdir -p dist
           for arch in amd64 arm64; do
+            # Standalone scopecache server (Unix socket / TCP).
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build \
               -trimpath \
               -ldflags="-s -w" \
               -o dist/scopecache-linux-$arch \
               ./cmd/scopecache
+
+            # Caddy with the scopecache module baked in. Two --with flags
+            # because the adapter and the core live in different modules
+            # (caddymodule/ has its own go.mod). Replace directives inside
+            # dependency go.mod files are ignored, so we restate caddymodule's
+            # own `replace scopecache => ../` here at the top level.
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch xcaddy build "$CADDY_VERSION" \
+              --with github.com/VeloxCoding/scopecache="$PWD" \
+              --with github.com/VeloxCoding/scopecache/caddymodule="$PWD/caddymodule" \
+              --output dist/caddyscope-linux-$arch
           done
 
       - name: Generate SHA-256 checksums
         run: |
           cd dist
-          sha256sum scopecache-linux-* > SHA256SUMS
+          sha256sum scopecache-linux-* caddyscope-linux-* > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create GitHub release
@@ -47,4 +66,6 @@ jobs:
             --generate-notes \
             dist/scopecache-linux-amd64 \
             dist/scopecache-linux-arm64 \
+            dist/caddyscope-linux-amd64 \
+            dist/caddyscope-linux-arm64 \
             dist/SHA256SUMS
