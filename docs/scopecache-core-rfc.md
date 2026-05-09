@@ -2446,8 +2446,8 @@ Max+ 395 with 32 GB LPDDR5X-8000) measure:
 
 Reads share the per-scope `sync.RWMutex` read-lock so multiple
 lookups within the same scope run concurrently. Aggregate
-throughput on an 8-core saturated workload reaches ~**77 million
-lookups per second** (~**13 ns per lookup**) on the same
+throughput on an 8-core saturated workload reaches **77 million
+lookups per second** (**13 ns per lookup**) on the same
 hardware. Beyond that point, read-lock atomic-counter contention
 on a single cache line prevents further linear scaling — adding
 cores past 8 yields only marginal additional throughput.
