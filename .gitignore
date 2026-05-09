@@ -18,11 +18,15 @@
 /bench-results/
 /deploy/Caddyfile.caddyscope.bench-backup
 /Caddyfile.caddyscope.bench-backup
-# Scripts are local-only operator/dev tooling; only drain_events.sh
-# (the StartSubscriber bridge reference, cited from docs/scopecache-core-rfc.md
-# §7.11) ships with the repo.
+# Scripts are local-only operator/dev tooling; only the explicitly
+# tracked exceptions below ship with the repo:
+#   - drain_events.sh: StartSubscriber bridge reference, cited from
+#     docs/scopecache-core-rfc.md §7.11.
+#   - install_and_benchmark.sh: client-side helper to seed a running
+#     scopecache instance with a small dataset and report throughput.
 /scripts/*
 !/scripts/drain_events.sh
+!/scripts/install_and_benchmark.sh
 # go.work + go.work.sum bind root + caddymodule for local dev (so a single
 # `go test ./...` run sees both modules without round-tripping through
 # proxy.golang.org). Per Go's own docs this file is per-machine and
