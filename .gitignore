@@ -26,10 +26,6 @@
 #   - install_caddyscope.sh: one-shot fresh-VPS installer (Ubuntu/
 #     Debian) that downloads the caddyscope binary from a GitHub
 #     release, sets up the systemd unit, and verifies /help.
-#   - install_binairy.txt: manual install walkthrough (numbered steps,
-#     copy-paste-friendly) for the caddyscope binary on a fresh VPS.
-#     Companion to install_caddyscope.sh for operators who want to
-#     understand each step rather than run the one-shot installer.
 #   - run_benchmark.sh: client-side helper to seed a running scopecache
 #     instance with a small dataset and report throughput.
 #   - frankenphp-scopecache-demo-linux-x86_64: pre-built static
@@ -39,7 +35,6 @@
 /scripts/*
 !/scripts/drain_events.sh
 !/scripts/install_caddyscope.sh
-!/scripts/install_binairy.txt
 !/scripts/run_benchmark.sh
 !/scripts/frankenphp-scopecache-demo-linux-x86_64
 # go.work + go.work.sum bind root + caddymodule for local dev (so a single
