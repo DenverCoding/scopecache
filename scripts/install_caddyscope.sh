@@ -214,11 +214,14 @@ echo
 echo "Done. Caddy + scopecache (${VERSION}) is running on :${PORT}."
 echo
 echo "Try it:"
-echo "  curl http://localhost:${PORT}/help"
-echo "  curl -X POST http://localhost:${PORT}/append \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"scope\":\"demo\",\"payload\":{\"msg\":\"hello\"}}'"
-echo "  curl 'http://localhost:${PORT}/tail?scope=demo'"
+echo
+echo "  APPEND new item"
+echo "    curl -X POST http://localhost:${PORT}/append \\"
+echo "      -H 'Content-Type: application/json' \\"
+echo "      -d '{\"scope\":\"demo\",\"payload\":{\"msg\":\"hello\"}}'"
+echo
+echo "  GET new item"
+echo "    curl 'http://localhost:${PORT}/tail?scope=demo'"
 echo
 echo "Benchmark it:"
 echo "  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/scripts/run_benchmark.sh | bash"
