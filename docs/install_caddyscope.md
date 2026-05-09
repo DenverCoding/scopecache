@@ -9,11 +9,17 @@ curl -fsSL https://raw.githubusercontent.com/VeloxCoding/scopecache/main/scripts
 Klaar — Caddy + scopecache draait, `/help` is getest, `wrk` is
 geïnstalleerd.
 
-Daarna de cache testen onder belasting:
+Daarna de cache testen onder belasting (zelfde patroon, geen `sudo`
+omdat de benchmark niks installeert):
 
 ```bash
-wget https://raw.githubusercontent.com/VeloxCoding/scopecache/main/scripts/run_benchmark.sh
-bash run_benchmark.sh
+curl -fsSL https://raw.githubusercontent.com/VeloxCoding/scopecache/main/scripts/run_benchmark.sh | bash
+```
+
+Met instellingen erbij gaan ze ook hier vóór `bash`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/VeloxCoding/scopecache/main/scripts/run_benchmark.sh | STEPS=2 WRK_DURATION=60s WRK_CONNECTIONS=200 bash
 ```
 
 ## Knoppen om aan te draaien

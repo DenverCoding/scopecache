@@ -219,8 +219,7 @@ echo "    -d '{\"scope\":\"demo\",\"payload\":{\"msg\":\"hello\"}}'"
 echo "  curl 'http://localhost:${PORT}/tail?scope=demo'"
 echo
 echo "Benchmark it:"
-echo "  wget https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/scripts/run_benchmark.sh"
-echo "  bash run_benchmark.sh"
+echo "  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/scripts/run_benchmark.sh | bash"
 echo
 echo "Service control:"
 echo "  systemctl status caddy --no-pager"
