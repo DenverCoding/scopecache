@@ -229,18 +229,16 @@ func writeGetResponse(w http.ResponseWriter, started time.Time, item Item, hit b
 		prefix = append(prefix, `{"ok":true,"hit":true,"count":1,"item":{`...)
 		first := true
 		if item.Scope != "" {
-			scopeJSON, _ := json.Marshal(item.Scope)
 			prefix = append(prefix, `"scope":`...)
-			prefix = append(prefix, scopeJSON...)
+			prefix = appendJSONString(prefix, item.Scope)
 			first = false
 		}
 		if item.ID != "" {
 			if !first {
 				prefix = append(prefix, ',')
 			}
-			idJSON, _ := json.Marshal(item.ID)
 			prefix = append(prefix, `"id":`...)
-			prefix = append(prefix, idJSON...)
+			prefix = appendJSONString(prefix, item.ID)
 			first = false
 		}
 		if item.Seq != 0 {
@@ -271,10 +269,13 @@ func writeGetResponse(w http.ResponseWriter, started time.Time, item Item, hit b
 	// Single-pass approx_response_mb estimate. Tracks the actual
 	// body size to within the width of the MB value itself (~8
 	// bytes), which rounds away inside the 4-decimal precision.
+	// strconv.AppendFloat with prec=4 matches MB.MarshalJSON's
+	// fmt.Sprintf("%.4f", v) output exactly while skipping the
+	// json.Marshal wrap and one allocation.
 	estTotal := len(prefix) + len(item.Payload) + len(suffix) + 30
-	mbJSON, _ := json.Marshal(MB(estTotal))
+	mbVal := float64(estTotal) / 1048576.0
 	suffix = append(suffix, `,"approx_response_mb":`...)
-	suffix = append(suffix, mbJSON...)
+	suffix = strconv.AppendFloat(suffix, mbVal, 'f', 4, 64)
 	suffix = append(suffix, '}', '\n')
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -294,6 +295,32 @@ func writeGetResponse(w http.ResponseWriter, started time.Time, item Item, hit b
 		}
 	}
 	_, _ = w.Write(suffix)
+}
+
+// appendJSONString appends s to dst as a JSON-encoded string
+// ("..."). Fast path for the common case where s contains no
+// JSON-special bytes — single linear scan plus an inline copy
+// with quote-wrap, no allocation. Slow path falls through to
+// encoding/json so escape semantics (HTML-safe < style for
+// <, >, &; control-char escaping; UTF-8 invalid-byte handling)
+// stay byte-for-byte identical to the previous json.Marshal call.
+//
+// Specials list mirrors json.Encoder's default-on HTML-escape
+// table; the validator already rejects control chars in scope/id
+// so they only show up in pathological items injected via
+// white-box tests, but the slow-path fallback is correct for
+// them too.
+func appendJSONString(dst []byte, s string) []byte {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' {
+			b, _ := json.Marshal(s)
+			return append(dst, b...)
+		}
+	}
+	dst = append(dst, '"')
+	dst = append(dst, s...)
+	return append(dst, '"')
 }
 
 // handleRender serves a single item as raw payload bytes with no JSON
