@@ -281,7 +281,17 @@ func writeGetResponse(w http.ResponseWriter, started time.Time, item Item, hit b
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(prefix)
 	if hit {
-		_, _ = w.Write(item.Payload)
+		// validatePayload rejects empty/null at write time so a stored
+		// Item should never reach this branch with len(Payload) == 0.
+		// Defensive: emit literal "null" instead of writing zero bytes
+		// (which would produce malformed JSON: "...,"payload":}..."),
+		// matching json.Marshal(RawMessage(nil))'s behaviour. ~1 ns
+		// branch on the hot path.
+		if len(item.Payload) == 0 {
+			_, _ = w.Write([]byte("null"))
+		} else {
+			_, _ = w.Write(item.Payload)
+		}
 	}
 	_, _ = w.Write(suffix)
 }

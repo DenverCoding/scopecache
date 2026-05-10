@@ -4114,3 +4114,201 @@ func TestGet_CorruptStoredPayloadServesAsIs(t *testing.T) {
 		t.Fatalf("/get response should include the (corrupt) payload bytes verbatim, got %q", rec.Body.String())
 	}
 }
+
+// /get on an item in the reserved _events scope renames the
+// payload-bearing field from "payload" to "event" (matches
+// Item.MarshalJSON's special case so /get and /tail emit the
+// same wire shape for _events). This test seeds an event by
+// performing a user-write under EventsModeFull, then GETs the
+// auto-populated _events item and asserts the field rename.
+func TestGet_EventsScopeRenamesPayloadFieldToEvent(t *testing.T) {
+	cfg := Config{
+		ScopeMaxItems: 100,
+		MaxStoreBytes: 100 << 20,
+		MaxItemBytes:  1 << 20,
+		Events:        EventsConfig{Mode: EventsModeFull},
+	}
+	api := NewAPI(NewGateway(cfg), APIConfig{})
+	h := http.NewServeMux()
+	api.RegisterRoutes(h)
+
+	if code, _, raw := doRequest(t, h, "POST", "/append",
+		`{"scope":"posts","id":"a","payload":{"v":1}}`); code != 200 {
+		t.Fatalf("seed user /append: code=%d body=%s want 200", code, raw)
+	}
+
+	rec := doRawRequest(t, h, "GET", "/get?scope=_events&seq=1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/get _events: code=%d body=%q want 200", rec.Code, rec.Body.String())
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("/get _events response unmarshal: %v; body=%q", err, rec.Body.String())
+	}
+	item, ok := parsed["item"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("/get _events item is not an object; body=%q", rec.Body.String())
+	}
+	// The outer Item wrapper renames `payload` -> `event` for items
+	// in the reserved _events scope. The inner event envelope may
+	// itself carry a `payload` field (the user-write's data) under
+	// EventsModeFull, so we check the top-level key only.
+	if _, has := item["event"]; !has {
+		t.Errorf("/get _events item missing \"event\" field; got keys %v", mapKeys(item))
+	}
+	if _, has := item["payload"]; has {
+		t.Errorf("/get _events item should NOT have a top-level \"payload\" field; got keys %v", mapKeys(item))
+	}
+}
+
+func mapKeys(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// /get on a counter item must emit the materialised current value,
+// not the stale Payload bytes that live on the surrounding Item.
+// The materialisation happens in buffer_read.go before the item
+// reaches the handler — this test pins the round-trip so a future
+// regression in materialiseCounter (or in the handler bypassing
+// it) is caught.
+func TestGet_CounterItemReflectsMaterialisedValue(t *testing.T) {
+	h, _ := newTestHandler(10)
+
+	if code, _, raw := doRequest(t, h, "POST", "/counter_add",
+		`{"scope":"views","id":"page","by":7}`); code != 200 {
+		t.Fatalf("seed counter_add: code=%d body=%s want 200", code, raw)
+	}
+	if code, _, raw := doRequest(t, h, "POST", "/counter_add",
+		`{"scope":"views","id":"page","by":3}`); code != 200 {
+		t.Fatalf("increment counter_add: code=%d body=%s want 200", code, raw)
+	}
+
+	_, out, raw := doRequest(t, h, "GET", "/get?scope=views&id=page", "")
+	if !mustBool(t, out, "hit") {
+		t.Fatalf("/get counter: hit=false; raw=%q", raw)
+	}
+	item, ok := out["item"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("/get counter: item is not an object; raw=%q", raw)
+	}
+	payload, ok := item["payload"]
+	if !ok {
+		t.Fatalf("/get counter: response missing payload field; raw=%q", raw)
+	}
+	got, ok := payload.(float64)
+	if !ok {
+		t.Fatalf("/get counter: payload is %T %v, expected JSON number; raw=%q", payload, payload, raw)
+	}
+	if got != 10 {
+		t.Errorf("/get counter payload=%v want 10", got)
+	}
+}
+
+// /get must JSON-escape scope and id strings that contain
+// JSON-special bytes (quote, backslash, control chars). The
+// fast path uses json.Marshal on these strings to inherit the
+// stdlib's escape rules; this test pins the contract.
+func TestGet_EscapesJSONSpecialCharactersInScopeAndID(t *testing.T) {
+	h, _ := newTestHandler(10)
+
+	// validatePayload rejects control chars in scope/id, so we
+	// stick to JSON-special bytes that ARE allowed: quote and
+	// backslash. Both still need escaping in the /get response
+	// to keep the JSON well-formed.
+	scope := `weird"scope\name`
+	id := `id"with\backslashes`
+
+	body := `{"scope":` + jsonString(scope) + `,"id":` + jsonString(id) + `,"payload":{"v":1}}`
+	if code, _, raw := doRequest(t, h, "POST", "/append", body); code != 200 {
+		t.Fatalf("seed /append with special chars: code=%d body=%s want 200", code, raw)
+	}
+
+	rec := doRawRequest(t, h, "GET", "/get?scope="+urlQueryEscape(scope)+"&id="+urlQueryEscape(id))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/get special chars: code=%d body=%q want 200", rec.Code, rec.Body.String())
+	}
+	respBody := rec.Body.String()
+	if !json.Valid([]byte(strings.TrimRight(respBody, "\n"))) {
+		t.Fatalf("/get response is not valid JSON: %q", respBody)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(respBody), &parsed); err != nil {
+		t.Fatalf("/get response unmarshal: %v; body=%q", err, respBody)
+	}
+	item, ok := parsed["item"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("/get item is not an object; body=%q", respBody)
+	}
+	if item["scope"] != scope {
+		t.Errorf("scope round-trip: got %q want %q", item["scope"], scope)
+	}
+	if item["id"] != id {
+		t.Errorf("id round-trip: got %q want %q", item["id"], id)
+	}
+}
+
+// /get with an artificially nil-payload Item (constructable only
+// via white-box buffer mutation; validatePayload blocks it on the
+// write path) must emit `"payload":null` rather than corrupt
+// `"payload":}`. The defensive guard in writeGetResponse restores
+// the json.Marshal(RawMessage(nil)) behaviour the old path had.
+func TestGet_NilPayloadEmitsLiteralNull(t *testing.T) {
+	h, api := newTestHandler(10)
+
+	if code, _, _ := doRequest(t, h, "POST", "/append",
+		`{"scope":"s","id":"a","payload":{"v":1}}`); code != 200 {
+		t.Fatal("seed append failed")
+	}
+
+	sh := api.store.shardFor("s")
+	sh.mu.RLock()
+	buf := sh.scopes["s"]
+	sh.mu.RUnlock()
+
+	buf.mu.Lock()
+	mutated := buf.items[0]
+	mutated.Payload = nil
+	mutated.renderBytes = nil
+	buf.items[0] = mutated
+	buf.byID["a"] = mutated
+	buf.bySeq[mutated.Seq] = mutated
+	buf.mu.Unlock()
+
+	rec := doRawRequest(t, h, "GET", "/get?scope=s&id=a")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/get nil payload: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if !json.Valid([]byte(strings.TrimRight(rec.Body.String(), "\n"))) {
+		t.Fatalf("/get nil payload produced invalid JSON: %q", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"payload":null`) {
+		t.Errorf("/get nil payload should emit \"payload\":null; got %q", rec.Body.String())
+	}
+}
+
+// Helpers used by the special-character round-trip test only —
+// the rest of the file uses url.QueryEscape inline where needed.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func urlQueryEscape(s string) string {
+	// net/url.QueryEscape would be cleaner but adding the import
+	// just for this helper feels heavy; the test inputs only contain
+	// ASCII bytes that need escaping, so we hand-write it.
+	var b strings.Builder
+	for _, r := range []byte(s) {
+		switch r {
+		case '"', '\\', '\t', '\n', ' ', '&', '?', '=', '+', '%', '#':
+			fmt.Fprintf(&b, "%%%02X", r)
+		default:
+			b.WriteByte(r)
+		}
+	}
+	return b.String()
+}
