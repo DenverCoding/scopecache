@@ -201,6 +201,13 @@ tuning), see [docs/install_caddyscope.md](docs/install_caddyscope.md).
 
 ## Performance
 
+The results of benchmarks are hardware-dependent. The numbers that are presented in this section were
+measured on an AMD Ryzen AI Max+ 395 with 32 GB of LPDDR5X-8000.
+The same random-seq /get workload on a 4-vCPU / 8 GB VPS reaches
+roughly 90,000 req/s. The point of this comparison is the
+**relative gap between the three routes, not the absolute
+throughput** — and that gap holds across hardware tiers.
+
 A side-by-side benchmark comparing three HTTP read paths under
 identical `wrk -t4 -c64 -d5s` load on the same host (50,000-item
 dataset, 10 runs averaged):
@@ -218,16 +225,9 @@ single in-process `getBySeq` lookup itself takes ~43 ns regardless of
 scope size (hash-map, O(1)) — about 23 million lookups per second per
 core.
 
-These figures are hardware-dependent. The numbers above were
-measured on an AMD Ryzen AI Max+ 395 with 32 GB of LPDDR5X-8000;
-the same random-seq /get workload on a 4-vCPU / 8 GB VPS reaches
-roughly 90,000 req/s. The point of this comparison is the
-**relative gap between the three routes, not the absolute
-throughput** — and that gap holds across hardware tiers.
-
 ### Resource utilization
 
-Higher throughput would not matter if it cost proportionally more CPU and RAM — a leaner route can be scaled horizontally to match. So a separate run captured per-process CPU usage (via `/proc` jiffies) and memory (via `/proc/[pid]/status` RSS) alongside throughput; the per-route ratios sit in one combined table:
+Higher throughput would not matter if it cost proportionally more CPU and RAM — a leaner route can be scaled horizontally to match. So a separate run captured per-process CPU usage (via `/proc` jiffies) and memory (via `/proc/[pid]/status` RSS) alongside throughput; the per-route ratios sit in one combined table.
 
 | Route | Requests/sec | Server CPU (cores avg) | Req/sec per core | Memory (MiB avg) | Req/sec per MiB |
 |---|---:|---:|---:|---:|---:|
