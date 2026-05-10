@@ -262,3 +262,84 @@ ScopeCache wins here because Caddy can answer directly from in-process memory.
 ```
 
 ScopeCache is one implementation of a broader idea: building an in-memory datastore directly into Caddy as a module. This benchmark demonstrates the performance value of that architectural approach.
+
+## 9. Route efficiency summary
+
+The throughput numbers from §6 alongside per-process CPU and memory measurements collected during the same runs, condensed into one place.
+
+### 9.1 Throughput and latency
+
+| Route | Requests/sec | Avg latency | p50 | p95 | p99 | Errors |
+|---|---:|---:|---:|---:|---:|---:|
+| Caddy → Node → Redis | 31,452 | 2.083 ms | 1.809 ms | 4.556 ms | 6.134 ms | 0 |
+| Caddy → FrankenPHP worker → Redis | 31,451 | 2.007 ms | 1.910 ms | 2.879 ms | 3.648 ms | 0 |
+| Caddy → ScopeCache | **227,979** | **0.390 ms** | **0.183 ms** | **1.508 ms** | **2.757 ms** | 0 |
+
+The two Redis-backed routes reach essentially identical throughput (~31k req/s). ScopeCache delivers about **7.25× higher throughput**. Median latency drops by about 10× (1.8–1.9 ms → 0.183 ms). Even p99 tail latency is lower for ScopeCache than for either Redis-backed route.
+
+### 9.2 Server-side CPU usage
+
+CPU usage of server-side processes only — wrk excluded.
+
+| Route | Total cores (avg) | Process breakdown |
+|---|---:|---|
+| Caddy → Node → Redis | 10.52 | Caddy 6.53, Node 3.57, Redis 0.42 |
+| Caddy → FrankenPHP worker → Redis | 6.67 | FrankenPHP/Caddy 5.76, Redis 0.91 |
+| Caddy → ScopeCache | 10.31 | Caddy/ScopeCache 10.31 |
+
+**Redis itself was never the bottleneck**: 0.42 core in the Node route and 0.91 core in the FrankenPHP route. Most of the CPU went into the request path *around* Redis — Caddy, the application runtime, protocol handling, decoding, and response construction.
+
+### 9.3 Throughput per server CPU core
+
+Dividing throughput by total server-side cores gives a route-efficiency metric.
+
+| Route | Requests/sec per server core |
+|---|---:|
+| Caddy → Node → Redis | ~2,989 |
+| Caddy → FrankenPHP worker → Redis | ~4,716 |
+| Caddy → ScopeCache | **~22,121** |
+
+FrankenPHP worker mode is roughly 1.6× more CPU-efficient than Node for the same workload. ScopeCache is about **7.4× more efficient than Node** and **4.7× more efficient than FrankenPHP worker mode** — the route itself uses CPU more productively, not just more of it.
+
+### 9.4 Memory usage
+
+| Route | RSS (avg) |
+|---|---:|
+| Caddy → Node → Redis | ~292 MiB |
+| Caddy → FrankenPHP worker → Redis | ~71 MiB |
+| Caddy → ScopeCache | ~83 MiB |
+
+The 50,000-item ScopeCache dataset itself accounts for about 5.5 MiB of the ScopeCache row.
+
+FrankenPHP worker mode is far more memory-efficient than Node — comparable throughput at roughly a quarter of the RSS. ScopeCache uses slightly more memory than the FrankenPHP route but delivers more than seven times the throughput.
+
+### 9.5 Throughput per MiB of memory
+
+Not a per-request memory cost — processes, buffers, and pools are shared across many requests. As a route-efficiency ratio it shows how much HTTP throughput each route extracts from its memory footprint.
+
+| Route | Requests/sec per MiB |
+|---|---:|
+| Caddy → Node → Redis | ~108 |
+| Caddy → FrankenPHP worker → Redis | ~443 |
+| Caddy → ScopeCache | **~2,747** |
+
+ScopeCache delivers **about 25× more throughput per MiB** than Node → Redis and **about 6.2× more** than FrankenPHP worker → Redis.
+
+### 9.6 Measurement method
+
+All data captured during the same runs:
+
+| Source | Measures |
+|---|---|
+| `docker stats` | container-level CPU and memory totals |
+| `/proc` jiffies | CPU per process group (Caddy, Node, FrankenPHP, Redis, ScopeCache, wrk) |
+| `/proc/[pid]/status` RSS | per-process memory |
+| `wrk` | HTTP throughput, latency distribution, errors |
+
+Splitting CPU per process group is what makes the per-route attribution possible — `docker stats` alone hides the application-vs-Redis-vs-Caddy split.
+
+### 9.7 Reading the summary
+
+The headline number from §6 (~7.25× more requests per second) is the visible effect. The route-efficiency ratios in §9.3 and §9.5 are the underlying cause: ScopeCache extracts more useful HTTP responses per CPU core and per MiB of memory because the request path is shorter. Caddy answers directly from its own process memory, with no application-runtime hop and no external cache roundtrip.
+
+Redis itself is fast. The expense was always in the path around Redis. Removing that path, when the workload allows it, is what makes ScopeCache competitive.
