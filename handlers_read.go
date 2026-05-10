@@ -45,23 +45,7 @@ func (api *API) writeItemsHit(
 			return
 		}
 	}
-
-	fields := make(orderedFields, 0, 5+len(extra))
-	fields = append(fields,
-		kv{"ok", true},
-		kv{"hit", len(items) > 0},
-		kv{"count", len(items)},
-	)
-	fields = append(fields, extra...)
-	fields = append(fields,
-		kv{"truncated", truncated},
-		kv{"items", items},
-	)
-	// Pre-flight estimateMultiItemResponseBytes above short-circuits
-	// pathological queries (limit=10000 against 1 MiB items) before
-	// marshal. writeJSONWithMetaCap is the post-flight authoritative
-	// cap on the marshalled body itself.
-	writeJSONWithMetaCap(w, http.StatusOK, fields, started, api.maxResponseBytes)
+	api.writeItemsResponse(w, started, items, truncated, extra)
 }
 
 // writeItemsMiss writes the canonical "scope does not exist" response
@@ -69,25 +53,185 @@ func (api *API) writeItemsHit(
 // writeItemsHit's success path; truncated is always false; items is
 // the sentinel empty slice (not nil — `[]Item{}` marshals as `[]`,
 // nil would marshal as `null` and break clients that iterate). Goes
-// through the same cap-aware writer as the hit path so cap behaviour
-// stays symmetric across hit and miss responses.
+// through the same single-buffer writer as the hit path so cap
+// behaviour stays symmetric across hit and miss responses.
 func (api *API) writeItemsMiss(
 	w http.ResponseWriter,
 	started time.Time,
 	extra orderedFields,
 ) {
-	fields := make(orderedFields, 0, 5+len(extra))
-	fields = append(fields,
-		kv{"ok", true},
-		kv{"hit", false},
-		kv{"count", 0},
-	)
-	fields = append(fields, extra...)
-	fields = append(fields,
-		kv{"truncated", false},
-		kv{"items", []Item{}},
-	)
-	writeJSONWithMetaCap(w, http.StatusOK, fields, started, api.maxResponseBytes)
+	api.writeItemsResponse(w, started, nil, false, extra)
+}
+
+// writeItemsResponse builds the /head / /tail / /scopelist (when
+// reused) envelope manually in a single buffer and writes it once.
+// The path that this replaces (writeJSONWithMetaCap → marshalWith-
+// ApproxSize) ran json.Marshal over the items array (one full
+// payload-bytes copy) and then spliced duration_us+approx_response_mb
+// into a fresh buffer (a second full copy). For 1000-item × 10 KiB
+// /tail responses that meant ~64 MiB of allocation per request.
+//
+// The new path: one buffer, pre-grown from estimateMultiItemResponse-
+// Bytes plus a small per-item JSON-skeleton headroom; per-item JSON
+// emitted by appendItemJSON; raw payload bytes appended once into
+// the buffer (still one copy per item — unavoidable without true
+// streaming, which would need an upper-bound size estimator to keep
+// the cap honest). Net savings: roughly half the previous allocation
+// volume per request.
+//
+// Cap discipline:
+//   - Pre-flight estimateMultiItemResponseBytes (LOWER bound) catches
+//     pathologically large requests before any allocation; that check
+//     lives in writeItemsHit.
+//   - Post-flight check on the actual built buffer length is
+//     authoritative; if exceeded, switch to a 507 envelope and
+//     discard the built body.
+func (api *API) writeItemsResponse(
+	w http.ResponseWriter,
+	started time.Time,
+	items []Item,
+	truncated bool,
+	extra orderedFields,
+) {
+	// Pre-grow buf so the per-item appends don't trigger slice
+	// re-grows on the hot path. The 32-byte per-item slack covers
+	// the JSON skeleton plus seq/ts digits.
+	estCapacity := int64(192) + int64(len(items))*32
+	for i := range items {
+		estCapacity += int64(len(items[i].Scope)) + int64(len(items[i].ID)) + int64(len(items[i].Payload))
+	}
+	buf := make([]byte, 0, estCapacity)
+
+	// Envelope head: ok, hit, count
+	buf = append(buf, `{"ok":true,"hit":`...)
+	if len(items) > 0 {
+		buf = append(buf, `true`...)
+	} else {
+		buf = append(buf, `false`...)
+	}
+	buf = append(buf, `,"count":`...)
+	buf = strconv.AppendInt(buf, int64(len(items)), 10)
+
+	// Extras (currently only /tail's "offset" int).
+	for _, kv := range extra {
+		buf = append(buf, ',', '"')
+		buf = append(buf, kv.K...)
+		buf = append(buf, '"', ':')
+		buf = appendKVValue(buf, kv.V)
+	}
+
+	// truncated, items
+	buf = append(buf, `,"truncated":`...)
+	if truncated {
+		buf = append(buf, `true`...)
+	} else {
+		buf = append(buf, `false`...)
+	}
+	buf = append(buf, `,"items":[`...)
+	for i := range items {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = appendItemJSON(buf, items[i])
+	}
+	buf = append(buf, ']')
+
+	// Suffix: duration_us + approx_response_mb (single-pass estimate).
+	buf = append(buf, `,"duration_us":`...)
+	buf = strconv.AppendInt(buf, time.Since(started).Microseconds(), 10)
+	estTotal := len(buf) + 30
+	mbVal := float64(estTotal) / 1048576.0
+	buf = append(buf, `,"approx_response_mb":`...)
+	buf = strconv.AppendFloat(buf, mbVal, 'f', 4, 64)
+	buf = append(buf, '}', '\n')
+
+	// Authoritative cap on the actual marshalled body.
+	if int64(len(buf)) > api.maxResponseBytes {
+		responseTooLarge(w, started, int64(len(buf)), api.maxResponseBytes)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf)
+}
+
+// appendItemJSON appends item to buf as JSON, mirroring
+// Item.MarshalJSON byte-for-byte: scope/id/seq are dropped when
+// zero-valued, ts and the payload-bearing field are always
+// emitted, and items in the reserved _events scope rename
+// "payload" to "event". Empty Payload (only reachable via
+// white-box mutation; validatePayload blocks it on the write
+// path) emits literal "null" instead of malformed `,"payload":}`.
+func appendItemJSON(buf []byte, item Item) []byte {
+	payloadKey := "payload"
+	if item.Scope == EventsScopeName {
+		payloadKey = "event"
+	}
+
+	buf = append(buf, '{')
+	first := true
+	if item.Scope != "" {
+		buf = append(buf, `"scope":`...)
+		buf = appendJSONString(buf, item.Scope)
+		first = false
+	}
+	if item.ID != "" {
+		if !first {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, `"id":`...)
+		buf = appendJSONString(buf, item.ID)
+		first = false
+	}
+	if item.Seq != 0 {
+		if !first {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, `"seq":`...)
+		buf = strconv.AppendUint(buf, item.Seq, 10)
+		first = false
+	}
+	if !first {
+		buf = append(buf, ',')
+	}
+	buf = append(buf, `"ts":`...)
+	buf = strconv.AppendInt(buf, item.Ts, 10)
+	buf = append(buf, ',', '"')
+	buf = append(buf, payloadKey...)
+	buf = append(buf, '"', ':')
+	if len(item.Payload) == 0 {
+		buf = append(buf, `null`...)
+	} else {
+		buf = append(buf, item.Payload...)
+	}
+	return append(buf, '}')
+}
+
+// appendKVValue handles the value types extras can carry on the
+// list-read envelope. /tail's "offset" is an int; the switch
+// cases below cover every type the current callers pass. Anything
+// else falls through to json.Marshal so future extras don't
+// silently break the wire format.
+func appendKVValue(buf []byte, v interface{}) []byte {
+	switch t := v.(type) {
+	case int:
+		return strconv.AppendInt(buf, int64(t), 10)
+	case int64:
+		return strconv.AppendInt(buf, t, 10)
+	case uint64:
+		return strconv.AppendUint(buf, t, 10)
+	case bool:
+		if t {
+			return append(buf, `true`...)
+		}
+		return append(buf, `false`...)
+	case string:
+		return appendJSONString(buf, t)
+	default:
+		b, _ := json.Marshal(v)
+		return append(buf, b...)
+	}
 }
 
 func (api *API) handleHead(w http.ResponseWriter, r *http.Request) {

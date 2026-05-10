@@ -24,6 +24,7 @@ package scopecache
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -113,20 +114,95 @@ func (api *API) handleScopeList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entries, truncated := api.store.scopeList(prefix, after, limit)
+	api.writeScopeListResponse(w, started, entries, truncated)
+}
 
-	// Cap-aware writer: a max-limit response with long scope names can
-	// approach api.maxResponseBytes; same shape as /head and /tail.
-	// `hit` is `count > 0` — same semantic as on /head/tail (which also
-	// derive it from len(items)>0), kept here so the list-return read
-	// family (`/head`, `/tail`, `/scopelist`) shares one wire prefix:
-	// `ok, hit, count, truncated, <list>`.
-	writeJSONWithMetaCap(w, http.StatusOK, orderedFields{
-		{"ok", true},
-		{"hit", len(entries) > 0},
-		{"count", len(entries)},
-		{"truncated", truncated},
-		{"scopes", entries},
-	}, started, api.maxResponseBytes)
+// writeScopeListResponse mirrors writeItemsResponse for /scopelist:
+// single-buffer manual JSON, no marshal+splice doubling. Each
+// scopeListEntry has eight scalar fields with no payload bytes, so
+// the per-row cost is small — but the 1000-entry × 100-byte-name
+// envelope still benefits from skipping the splice copy that
+// writeJSONWithMetaCap performs in marshalWithApproxSize.
+//
+// The `hit`/`count`/`truncated`/`scopes` ordering matches what the
+// previous orderedFields path produced; `hit` is `count > 0`, the
+// same semantic /head and /tail derive from `len(items) > 0`, so
+// the list-return read family stays uniform on the wire.
+func (api *API) writeScopeListResponse(
+	w http.ResponseWriter,
+	started time.Time,
+	entries []scopeListEntry,
+	truncated bool,
+) {
+	estCapacity := int64(192) + int64(len(entries))*150
+	for i := range entries {
+		estCapacity += int64(len(entries[i].Scope))
+	}
+	buf := make([]byte, 0, estCapacity)
+
+	buf = append(buf, `{"ok":true,"hit":`...)
+	if len(entries) > 0 {
+		buf = append(buf, `true`...)
+	} else {
+		buf = append(buf, `false`...)
+	}
+	buf = append(buf, `,"count":`...)
+	buf = strconv.AppendInt(buf, int64(len(entries)), 10)
+	buf = append(buf, `,"truncated":`...)
+	if truncated {
+		buf = append(buf, `true`...)
+	} else {
+		buf = append(buf, `false`...)
+	}
+	buf = append(buf, `,"scopes":[`...)
+	for i := range entries {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = appendScopeListEntryJSON(buf, entries[i])
+	}
+	buf = append(buf, ']')
+
+	buf = append(buf, `,"duration_us":`...)
+	buf = strconv.AppendInt(buf, time.Since(started).Microseconds(), 10)
+	estTotal := len(buf) + 30
+	mbVal := float64(estTotal) / 1048576.0
+	buf = append(buf, `,"approx_response_mb":`...)
+	buf = strconv.AppendFloat(buf, mbVal, 'f', 4, 64)
+	buf = append(buf, '}', '\n')
+
+	if int64(len(buf)) > api.maxResponseBytes {
+		responseTooLarge(w, started, int64(len(buf)), api.maxResponseBytes)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf)
+}
+
+// appendScopeListEntryJSON appends a single scopeListEntry to buf
+// as JSON. Field order matches the struct-tag order in store.go's
+// scopeListEntry definition; ApproxScopeMB renders as %.4f exactly
+// like MB.MarshalJSON does.
+func appendScopeListEntryJSON(buf []byte, e scopeListEntry) []byte {
+	buf = append(buf, `{"scope":`...)
+	buf = appendJSONString(buf, e.Scope)
+	buf = append(buf, `,"item_count":`...)
+	buf = strconv.AppendInt(buf, int64(e.ItemCount), 10)
+	buf = append(buf, `,"last_seq":`...)
+	buf = strconv.AppendUint(buf, e.LastSeq, 10)
+	buf = append(buf, `,"approx_scope_mb":`...)
+	buf = strconv.AppendFloat(buf, float64(e.ApproxScopeMB)/1048576.0, 'f', 4, 64)
+	buf = append(buf, `,"created_ts":`...)
+	buf = strconv.AppendInt(buf, e.CreatedTS, 10)
+	buf = append(buf, `,"last_write_ts":`...)
+	buf = strconv.AppendInt(buf, e.LastWriteTS, 10)
+	buf = append(buf, `,"last_access_ts":`...)
+	buf = strconv.AppendInt(buf, e.LastAccessTS, 10)
+	buf = append(buf, `,"read_count_total":`...)
+	buf = strconv.AppendUint(buf, e.ReadCountTotal, 10)
+	return append(buf, '}')
 }
 
 func (api *API) handleHelp(w http.ResponseWriter, r *http.Request) {
