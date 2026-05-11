@@ -1,173 +1,344 @@
-# scopecache
+# ScopeCache
 
-ScopeCache is a lightweight in-memory datastore/cache that runs inside Caddy. It lets Caddy serve selected dynamic reads directly from memory. This can reduce pressure on both the database and application layer.
+ScopeCache is a lightweight in-process datastore/cache and write buffer for Caddy: a simple, scope-partitioned, ordered datastore built for ultra-fast dynamic reads.
 
-ScopeCache works standalone over plain HTTP and can be used by any programming language. But it is designed to shine as a Caddy module: when installed inside Caddy, ScopeCache runs in the same process as the webserver, allowing Caddy to serve ScopeCache data directly from memory.
+It stores application data in memory and lets Caddy serve selected reads directly from the web server process. This can reduce pressure on both the database and the application layer.
 
-This avoids the usual request path through separate application and storage processes on requests, such as PHP, Node.js, Redis, or a database. In benchmark tests, this direct in-process path served data about 9× faster than routing the same request through Node.js and Redis, even though all services were installed on the same server.
+ScopeCache is not a Redis replacement and not an HTTP response cache. It is an application-managed, scope-addressed materialized-view datastore: your application decides what data is stored, under which scope, and when it is updated or removed.
 
-By removing separate application and storage services from the request path, ScopeCache can reach a latency and throughput profile that traditional multi-service request paths cannot realistically match.
+## How ScopeCache works
 
-ScopeCache deliberately keeps filtering limited. The core only addresses a few official top-level fields, which keeps it robust, predictable, and fast. But ScopeCache remains flexible enough for many real-world use cases.
+Traditional hot-read paths often look like this:
 
-For example, the following request returns the latest 100 reactions for thread `123`:
-
-```
-https://example.com/tail?scope=thread:123&limit=100
+```text
+Caddy -> application runtime (Node.js/PHP/etc.) -> Redis/database -> application runtime -> response
 ```
 
-ScopeCache is not a replacement for Redis or similar in-memory data stores. Those systems offer a much broader feature set: richer data types, more commands, clustering, and mature operational tooling. Their raw performance is not the limiting factor in this comparison. The relevant difference is the request path around them. 
+ScopeCache allows selected reads to take a shorter path:
 
-ScopeCache is not an HTTP response cache like Varnish or Souin. It is a scope-addressed publish cache: your application decides what data is stored, under which scope, and when it is updated or removed. ScopeCache can also act as a write buffer, with built-in support for change notifications so external scripts can drain, process, or persist events elsewhere.
+```text
+Caddy -> ScopeCache memory -> response
+```
 
-## Why ScopeCache Exists
+When ScopeCache is compiled into Caddy, it runs in the same OS process as the web server. There is no Redis protocol, no cache-service roundtrip, and no separate cache process on the hot read path.
 
-### lightweight inmem datastore
-ScopeCache targets workloads where an application needs a hot, scope-addressed views in memory rather than a full general-purpose datastore. Examples include latest thread messages, unread counters, inbox views, view counts, rate-limit buckets, pre-rendered HTML fragments for HTMX-driven interfaces, and small materialized views.
+In benchmark tests, this direct in-process path served data about 9× faster than routing the same request through Node.js and Redis on the same server. The relevant difference is architectural: ScopeCache removes parts of the request path. It does not claim that Redis itself is slow.
 
-Redis is excellent software, but for these narrow patterns it can be more infrastructure than the workload requires. ScopeCache is built for cases where the cache can safely be disposable, rebuilt from the source of truth, and served directly from the webserver process. Because ScopeCache runs inside Caddy, cache reads can be served directly from the webserver process. For suitable hot-read paths, this can remove the need for a separate cache service and reduce pressure on the application runtime, resulting in fewer moving parts, lower resource usage, and higher HTTP throughput. Redis is typically used in order to reduce pressure on the database, but requests still pass through the application layer. ScopeCache can reduce pressure on both the database and the application layer, because suitable cache reads can be served directly by Caddy.
+A typical request:
 
-### FrankenPHP 
-The second reason ScopeCache exists is [FrankenPHP](https://frankenphp.dev/).
+```text
+GET /tail?scope=thread:123&limit=100
+```
+
+returns the latest 100 items for the scope `thread:123`.
+
+## What ScopeCache is
+
+ScopeCache is a small in-memory datastore/cache for workloads where the application already knows which views need to be served quickly.
+
+Good examples include:
+
+- latest messages or reactions in a thread
+- private inbox views
+- unread counters
+- notification lists
+- view counters
+- rate-limit buckets
+- pre-rendered HTML fragments for HTMX-driven interfaces
+- small materialized JSON, HTML, XML, or text views
+- high-frequency events that need to be drained later
+
+The cache is intentionally disposable. Your database remains the source of truth. ScopeCache can be wiped, warmed, or rebuilt at any time.
+
+## What ScopeCache is not
+
+ScopeCache is not a general-purpose Redis replacement. Redis and similar systems offer a much broader feature set: richer data types, more commands, clustering, persistence options, replication, mature operational tooling, and a large ecosystem.
+
+ScopeCache is also not a traditional HTTP response cache like Varnish or Souin. It does not cache responses automatically based on incoming URLs or cache-control headers.
+
+Instead, your application publishes prepared data into named scopes, and Caddy can serve that data directly.
+
+```text
+application -> ScopeCache scope/id -> Caddy serves it
+```
+
+## Core model
+
+ScopeCache stores items inside scopes.
+
+A scope is a named partition, similar to a namespace or bucket. Each scope contains an ordered collection of items. Items are addressable only through official top-level fields:
+
+- `scope` — required partition key
+- `id` — optional stable application-owned identifier
+- `seq` — cache-owned sequence number, assigned by ScopeCache
+- `ts` — cache-owned microsecond timestamp, set by ScopeCache on every write; observability only, not searchable and not used for ordering
+- `payload` — required JSON value, treated as opaque application data
+
+ScopeCache does not inspect the payload for filtering or querying. Filtering, addressing, and cursoring only operate on official top-level item fields.
+
+Item IDs are optional. If present, they let the application give an item a stable, meaningful name.
+
+ScopeCache does not interpret those IDs. They are plain strings. Their meaning belongs to the application.
+
+## Limited filtering, flexible access
+
+ScopeCache deliberately avoids becoming a query engine.
+
+There is no query language, no joins, no arbitrary predicates, no sorting DSL, and no payload inspection beyond validation at write time.
+
+Instead, flexibility comes from creating materialized views ahead of time:
+
+```text
+thread:34
+user:42:inbox
+user:42:unread
+tenant:acme:thread:34
+```
+
+If you need “all unread notifications for user 42”, your application stores that view under a scope such as:
+
+```text
+user:42:unread
+```
+
+ScopeCache then serves that scope quickly. It does not search through payloads to discover it.
+
+Although filtering is limited, ScopeCache remains flexible — and usable for most real-world use cases — through scope and ID naming.
+
+Instead of searching inside payloads, the application encodes access patterns into scope names. For example, unread messages for a user can be stored under `user:123:unread`.
+
+Because each scope is ordered by its cache-assigned `seq`, retrieving the latest 100 unread messages is a native operation:
+
+```text
+/tail?scope=user:123:unread&limit=100
+```
+
+**ScopeCache combines key-value style access with ordered per-scope collections.** Direct lookups by `id` or `seq` behave like simple key-value reads, while the built-in sequence order makes operations such as `tail`, `head`, and `since(seq)` natural core primitives.
+
+## Main use cases
+
+### 1. Read cache
+
+ScopeCache can serve hot dynamic data directly from Caddy.
+
+This is useful when normal HTTP response caching is inconvenient or too coarse-grained, for example:
+
+- private user-specific data
+- frequently changing thread data
+- inboxes
+- notifications
+- counters
+- pre-rendered fragments
+
+Your application prepares the data and writes it into ScopeCache. Caddy then serves selected reads without involving the application runtime.
+
+### 2. Write buffer
+
+ScopeCache can also buffer high-frequency events such as analytics hits, log lines, chat messages, or counters.
+
+A worker can drain the buffer in batches using endpoints such as `/tail` and `/delete_up_to`, then process, persist, or forward the data elsewhere.
+
+ScopeCache also includes a subscription model for change notifications, so an external process can be notified when new data is available.
+
+### 3. Fronting proxy for prepared content
+
+ScopeCache can serve cached HTML, JSON, XML, or text directly through `/render`.
+
+This may look similar to an HTTP response cache, but the model is different. ScopeCache does not decide what to cache from incoming requests. Your application precomputes the content, stores it under a scope and ID, and Caddy serves it directly when requested.
+
+## Core endpoints
+
+The core HTTP API is intentionally small.
+
+- **Read:** `get`, `render`, `head`, `tail`
+- **Write:** `append`, `upsert`, `update`, `counter_add`
+- **Bulk / load:** `warm`, `rebuild`
+- **Cleanup:** `delete`, `delete_up_to`, `delete_scope`, `wipe`
+- **Observe:** `stats`, `scopelist`, `help`
+
+The exact endpoint contracts are documented in [`docs/scopecache-core-rfc.md`](docs/scopecache-core-rfc.md).
+
+## Why ScopeCache exists
+
+### A lightweight in-memory datastore for hot views
+
+Redis is excellent software. But for narrow hot-read patterns, it can be more infrastructure than the workload requires.
+
+Redis is often used to reduce pressure on the database, but the request still usually passes through the application layer:
+
+```text
+web server -> application -> Redis -> application -> response
+```
+
+ScopeCache is built for cases where the cache can safely be disposable, rebuilt from the source of truth, and served directly from the web server process.
+
+For suitable read paths, ScopeCache can reduce pressure on both:
+
+- the database
+- the application runtime
+
+That means fewer moving parts, lower per-request overhead, and higher HTTP throughput for the specific paths that fit this model.
+
+### FrankenPHP
+
+The other major motivation for ScopeCache is [FrankenPHP](https://frankenphp.dev/).
 
 FrankenPHP shows how powerful a Caddy-based architecture can be when more of the web stack runs together. Its worker mode improves PHP performance by keeping application workers alive in memory, avoiding much of the overhead of traditional per-request PHP execution.
 
 FrankenPHP also makes distribution simpler: a PHP application can be packaged into a single binary that includes Caddy and Mercure for Server-Sent Events. No separate installation and configuration of a web server or PHP runtime is required.
 
-But when Redis is required for optimal performance, that distribution model breaks down. Redis remains a separate service that must be run, secured, monitored, and maintained. It also cannot be compiled into the same single binary as the PHP application, web server, and Mercure. 
+But when Redis is required for optimal performance, that distribution model becomes less self-contained. Redis remains a separate service that must be run, secured, monitored, and maintained. It also cannot be compiled into the same single binary as the PHP application, web server, and Mercure.
 
-FrankenPHP reduces one service boundary by bringing the PHP runtime closer to Caddy. ScopeCache applies a related idea to data: keep frequently accessed data inside the web server process and avoid an additional cache-service roundtrip on the read path. Also important: because ScopeCache is a Caddy module, it can be compiled into the same custom FrankenPHP/Caddy binary as Caddy, the PHP runtime, and the SSE hub.
+FrankenPHP reduces one service boundary by bringing the PHP runtime closer to Caddy. ScopeCache applies a related idea to data: keep frequently accessed data inside the web server process and avoid an additional cache-service roundtrip on the read path.
 
-**PHP extensions can be written in Go**
-One important advantage of FrankenPHP’s design is that PHP extensions can be written in Go. That process is surprisingly simple: you write a small Go file with //export_php:function directives, run one generator command, and the annotated Go functions become available in PHP as native function calls.
+Because ScopeCache is a Caddy module, it can be compiled into the same custom FrankenPHP/Caddy binary as Caddy, the PHP runtime, and the SSE hub.
 
-Because FrankenPHP and Caddy are tightly integrated, Caddy, PHP, and ScopeCache can all run inside the same OS process: one PID, one address space. That matters. A PHP extension written in Go can access ScopeCache through cgo without leaving the process.
+### PHP extensions written in Go
 
-The call from Caddy routes to the ScopeCache handler is just a Go function call, not a TCP request. There is no socket, no kernel roundtrip, and no serialization step on either side. This is very different from the conventional setup. In a typical PHP + Redis deployment, PHP runtime and Redis run as separate OS processes with separate address spaces. Every cache lookup has to cross a process boundary and go through protocol-level serialization on both ends.
+One important advantage of FrankenPHP’s design is that PHP extensions can be written in Go. A small Go file with `//export_php:function` directives can be processed by a generator, making Go functions available in PHP as native function calls.
 
-The performance difference is substantial. A scopecache_get() call from PHP, exposed through the Go extension, takes about 0.3 µs on average. A single PHP-to-Redis lookup that opens and closes its connection takes roughly 581 µs. With a persistent Redis connection, that drops to about 126 µs in steady state.
+Because FrankenPHP and Caddy are tightly integrated, Caddy, PHP, and ScopeCache run inside the same OS process: one PID, one address space.
 
-Even in that best-case Redis scenario, the PHP-to-Redis path is still about 452× slower than the equivalent in-process ScopeCache call. 
+That matters. A PHP extension written in Go can call ScopeCache without leaving the process. Compared with a typical PHP + Redis setup, this removes the Redis protocol, socket roundtrip, and separate Redis process from the access path.
 
-To fully unlock the potential of FrankenPHP, you need a datastore like ScopeCache: written in Go, integrated into Caddy, and designed to run in the same process.
+There is still a PHP-to-Go extension boundary, including type conversion. But the path is much shorter than a traditional PHP-to-Redis call.
 
-## What it is: Core features and Addons
+In an initial benchmark, a `scopecache_get()` call exposed through a Go extension took about 0.3 µs on average. A single PHP-to-Redis lookup that opened and closed its connection took roughly 581 µs. With a persistent Redis connection, that dropped to about 126 µs in steady state.
 
-As stated above, ScopeCache is a in-memory publish cache and write buffer. It can hold a slice of your data in RAM in front of your persistent data store. Items live inside *scopes* — what other systems call a namespace or bucket — and are addressable only by `scope`, `id`, or `seq`. The entire cache is wipeable and rebuildable from the source of
-truth at any time. 
+Even in that best-case Redis scenario, the measured PHP-to-Redis access path was still about 452× slower than the equivalent in-process ScopeCache call.
 
-Because scope names and IDs are plain strings, ScopeCache remains flexible without adding a query language. The application can encode its own domain model into names such as:
+These numbers measure the complete access path for this specific workload. They do not mean that ScopeCache’s internal lookup algorithm is hundreds of times faster than Redis internally.
 
-```text
-thread:34                    -> latest messages or reactions in a thread
-user:42:inbox                -> private inbox data for one user
-tenant:acme:thread:34        -> thread data scoped to one tenant
-article:hello-world:comments -> comments for one article
-chat:user:42:user:77         -> messages in a private chat
-counter:thread:34            -> counters for one thread
-```
+To fully unlock the potential of FrankenPHP, you need more than an embedded PHP runtime. You also need application data that can live close to the application layer and the web server. ScopeCache is built for that role.
 
-Item IDs are optional. ScopeCache automatically assigns a `seq` value to every item, so items can always be ordered and addressed by sequence.
+## Internals
 
-Optional IDs let the application give items a stable, meaningful name, such as `reaction:884`, `comment:102`, `notification:183`, `views`, or `likes`.
+### Storage model
 
-ScopeCache treats both scope names and IDs as plain strings. It does not inspect or filter on parts of the ID, but meaningful IDs make it easy for the application to address, update, delete, or organize items.
+ScopeCache’s internal storage model is deliberately simple.
 
-ScopeCache deliberately keeps filtering limited. It will not grow into a query engine. Flexibility comes from creating materialized views of your data: the application prepares the views that clients need and stores them under separate, purpose-specific scopes such as `thread:34`, `user:42:inbox`, or `user:42:unread`.
+Each scope owns one ordered slice of items, stored in append order. Around that slice, ScopeCache maintains lightweight hashmap indexes for direct lookup by `id` and `seq`.
 
-ScopeCache has three main use cases:
-
-- **Read cache.** A traditional HTTP response cache like Varnish works well for public responses that can be cached by URL and cache-control rules. But for frequently changing data or private data a response cache is often less convenient, and sometimes the wrong tool entirely.
-  ScopeCache can store data under scopes and IDs. That makes it useful for things like new chat messages for a specific user, the latest reactions in a thread, private inbox data, view-counters and notifications.
-- **Write buffer.** ScopeCache can buffer high-frequency events such as analytics hits, log lines, or chat messages. A background worker can drain the buffer in batches using `/tail` and `/delete_up_to`, then process, persist, or forward the data elsewhere. ScopeCache also includes a subscription model for change notifications, so an external script or worker can be notified when new data is available for processing.
-- **Fronting proxy.** A webserver with scopecache can serve cached HTML, JSON, or XML directly from `/render`, without involving the application layer. This may look similar to an HTTP response cache, but the model is different: ScopeCache does not cache responses based on incoming requests. Instead, your application precomputes the content, stores it under a scope and ID, and the proxy serves that content directly when requested. 
-
-ScopeCache provides two built-in convenience mechanisms around the core:
-
-- A build-up script can run automatically when the webserver starts, making it easy to rebuild or warm the cache after a restart.
-- A subscription model can notify external applications or scripts when data changes, so they can drain, process, persist, or otherwise handle incoming data.
-
-Apart from the two convenience features mentioned above, the core is intentionally limited to a small set of HTTP endpoints:
-
-- **Read:** `get`, `head`, `tail`
-- **Write / load:** `append`, `warm`, `rebuild`
-- **Cleanup:** `delete`, `delete_up_to`, `delete_scope`
-- **Observe:** `stats`, `scopelist`
-
-## ScopeCache 'internals'
-
-### The data structure
-The underlying data structure of ScopeCache is deliberately simple. Each scope owns one ordered slice, containing the items in append order, plus lightweight indexes for direct lookup:
+Conceptually, the core shape is:
 
 ```go
-type ScopeBuffer struct {
-    items    []Item              // primary storage, in append order
-    idIndex  map[string]int      // id  → position in items
-    seqIndex map[uint64]int      // seq → position in items
-    mu       sync.RWMutex        // one lock per scope
+type scopeBuffer struct {
+    items []Item              // primary storage, in append order
+    byID  map[string]Item     // id  -> item
+    bySeq map[uint64]Item     // seq -> item
+    mu    sync.RWMutex        // one lock per scope
 }
 ```
 
-The slice is the primary storage. It defines the physical order of the data in memory. The indexes exist only to avoid scanning: a lookup by `id` or `seq` becomes a hashmap lookup followed by direct slice access.
+The slice is the ordered storage. It defines the physical order of the data in memory and makes operations such as `head`, `tail`, and cursor-based reads natural.
 
-That makes direct lookups O(1) on average, while preserving the natural append order of the collection.
+The maps exist to avoid scanning. A lookup by `id` or `seq` is an O(1) hashmap lookup on average, independent of the number of items in the scope.
 
-A classical key-value store, such as Redis, Memcached, or a plain hashmap, is conceptually built around:
+A classical key-value store is conceptually built around:
 
 ```text
-key → value
+key -> value
 ```
 
-Ordering is not part of that basic model. If you want operations such as “give me the 10 newest items”, you usually build that on top with lists, streams, sorted sets, timestamps, or secondary indexes. A key-value store can support ordered access, but ordering is not its natural shape.
+Ordering is not part of that basic model. If you want “the latest 10 items”, you usually build that on top with lists, streams, sorted sets, timestamps, or secondary indexes.
 
-ScopeCache is different: order is part of the storage model itself.
+ScopeCache starts from a different shape:
 
-Each scope is an ordered collection first, with hashmap indexes around it for fast random access.
+```text
+scope -> ordered collection -> indexed items
+```
 
-### Limited but flexible filtering
+Each scope is an ordered collection first, with direct lookup indexes around it. That is why operations such as `head`, `tail`, and cursor-based reads are native core primitives rather than conventions layered on top of a flat keyspace.
 
-ScopeCache deliberately limits filtering to three axes: `scope`, `id`, and `seq`. There is no query language, no joins, and no payload inspection (apart from JSON + UTF-8 validity checks at write time). There is no TTL system and when the configured memory limit is reached, ScopeCache fails writes explicitly with HTTP `507 Insufficient Storage` instead of silently deleting data in the background. 
+### Locking and sharding
 
-Internally, the top-level store is a 32-shard map keyed by scope name. A write may briefly touch a shard-level lock to find the
-scope, but after that the operation is handled by the scope's own buffer. That means unrelated scopes do not block each other during the actual data mutation.
+Internally, the top-level store is sharded by scope name. A request may briefly touch a shard-level lock to find the scope buffer. After that, the operation is handled by the scope’s own buffer.
 
-Each scope stores items in an append-oriented slice, with two parallel indexes: one keyed by seq, and one keyed by id.
+That means unrelated scopes do not block each other during normal per-scope operations.
 
-A request such as `GET /get?scope=X&seq=N` resolves in two hash-map lookups: a top-level shard-map lookup to find the scope buffer, then a `bySeq` map lookup that returns the item directly. Both steps are O(1) on average, independent of scope size — about 43 ns per lookup, roughly 23 million per second on a single CPU core. (Ordered traversals such as `/head` and `/tail` walk the `items` slice instead; the maps are unused for those endpoints.)
+```text
+scope "thread:1" -> own buffer -> own lock
+scope "thread:2" -> own buffer -> own lock
+scope "user:42"  -> own buffer -> own lock
+```
 
-Reads share a per-scope read-lock so multiple lookups run concurrently. On multicore hardware, aggregate throughput rises to roughly 77 million lookups per second at 8 cores — about 13 ns per lookup — and plateaus there: read-lock contention prevents further linear scaling beyond that point.
+Reads share a per-scope read lock, so multiple reads on the same scope can run concurrently. Writes take the per-scope write lock for the duration of the mutation.
 
-That performance is not accidental. It comes from both performance tuning and a deliberately small core: no query language, no joins, no payload inspection, and no application logic in the hot path. ScopeCache stays fast and predictable by rejecting features that would add flexibility at the cost of speed, simplicity, or stability.
+This matches the data model: scopes are not only names, but natural concurrency partitions.
 
-This limitation of the core functionality of ScopeCache is intentional: ScopeCache keeps the core small, stable, and predictable, while leaving higher-level behavior to modules and addons. The core and the two features are heavily tested, validated, optimized and benchmarked. 
+### Performance shape
 
-P.S. These number refer only to the internal in-process lookup, not to a full request through Caddy's routing, request parsing, response writing.  
+A request such as:
 
-### Addons
+```text
+GET /get?scope=X&seq=N
+```
 
-Higher-level behavior — such as multi-tenant gateways, batch dispatchers, write-only ingestion, custom authentication, access control, persistence, or event processing — stays outside the core and can be implemented as separate addon packages.
+resolves conceptually as:
 
-ScopeCache exposes a single public Go API surface — `*Gateway` — that addons build on top of. Internal types (`*store`, `*scopeBuffer`, and other lowercase identifiers in the core package) are not reachable from outside the package, so addons physically cannot reach into them.
+```text
+scope lookup -> bySeq lookup -> item
+```
 
-The gateway layer exists for three concrete reasons:
+Both lookup steps are O(1) on average. Ordered reads such as `/head` and `/tail` walk the `items` slice instead.
 
-1. **Stable boundary.** The core can rename, reshape, or replace its internal types between versions without breaking any addon that depends only on `*Gateway`. Internals are free to evolve; the contract with addons does not. More importantly, new addons can be built without worrying about ScopeCache's internals — memory sharding, lock discipline, byte-budget accounting, or any other implementation detail below `*Gateway`.
-2. **Defensive cloning.** Every byte slice that crosses the gateway is copied in both directions, so internal buffers can never be mutated by an addon, and an addon's byte slices can never be mutated by the cache. Internal call paths inside the core skip the copy — cloning is a boundary concern, not a per-call tax.
-3. **Uniform validation.** Shape rules (scope length, payload size, JSON validity) live at the `*store` boundary below `*Gateway`, so every entry into the cache — HTTP request or Go API call — passes through the same checks. An addon cannot bypass validation that an HTTP caller faces.
+A single in-process lookup can take tens of nanoseconds. In one benchmark, `getBySeq` took about 43 ns per lookup on a single CPU core, roughly 23 million lookups per second. Because each scope has its own read/write lock, reads on different scopes scale independently across cores; reads on the same scope share a read-lock and also run concurrently.
 
-The result: the core stays stable, fast, and predictable, while ScopeCache remains straightforward to extend for application-specific needs.
+These internal numbers refer only to the in-process lookup itself. They do not include Caddy routing, HTTP request parsing, response writing, JSON encoding, or network overhead.
 
-For example, an authorization addon can validate a bearer token, map it to the scopes that token may access, and then return only the items from those allowed scopes — all without touching anything below `*Gateway`.
+The larger HTTP benchmark numbers in this README measure complete request paths.
 
-There is no TTL system built into ScopeCache, but it is easy to implement lifecycle or draining behavior outside the core. ScopeCache includes a built-in subscription model, allowing an external process to be notified when new items are appended. That process can drain the new items, process them, and persist them elsewhere. Depending on the use case, draining can happen immediately or after a short delay — for example 0.5 seconds or longer — so items can be processed in batches.
+## Addons and extension model
 
-So, ScopeCache is built around a modular architecture. Addons interact with the cache through a clear built-in gateway API, instead of reaching directly into the internal core.
-For example, an authorization/access addon had been built that validates a bearer token and then returns only the items from the scopes that token is allowed to access.
+Higher-level behavior stays outside the core.
 
+Examples include:
 
-## Quickstart Docker install
+- multi-tenant gateways
+- batch dispatchers
+- write-only ingestion
+- custom authentication
+- access control
+- persistence bridges
+- event processors
+- custom lifecycle/draining behavior
 
-Caddy with scopecache baked in, served on `localhost:8081`:
+ScopeCache exposes a public Go API surface through `*Gateway`. Addons build on top of that boundary instead of reaching directly into internal types such as `*store` or `*scopeBuffer`.
+
+The gateway exists for three concrete reasons.
+
+### 1. Stable boundary
+
+The core can rename, reshape, or replace internal types between versions without breaking addons that depend only on `*Gateway`.
+
+Internals are free to evolve. The addon contract stays stable.
+
+### 2. Defensive cloning
+
+Byte slices that cross the gateway boundary are copied in both directions. This prevents addons from mutating internal cache buffers and prevents ScopeCache from mutating an addon’s input buffers.
+
+Internal call paths inside the core can skip this copy. Cloning is a boundary concern, not a per-call tax inside the core.
+
+### 3. Uniform validation
+
+Shape rules such as scope length, payload size, and JSON validity live below the gateway, so every entry into the cache passes through the same checks.
+
+An addon cannot bypass validation that an HTTP caller faces.
+
+## Built-in convenience mechanisms
+
+ScopeCache includes two convenience mechanisms around the core:
+
+- a warm-up script hook that can run when the web server starts
+- a subscription model that can notify external processes when data changes
+
+The subscription model is useful for draining and persistence workflows. A worker can be notified when new items are appended, drain them in batches, process them, and persist them elsewhere.
+
+Depending on the use case, draining can happen immediately or after a short delay so items can be processed in batches.
+
+## Quickstart: Docker
+
+Run Caddy with ScopeCache baked in on `localhost:8081`:
 
 ```bash
 git clone https://github.com/VeloxCoding/scopecache.git
@@ -176,8 +347,7 @@ docker compose up -d --build caddyscope
 curl http://localhost:8081/help
 ```
 
-The bundled [deploy/Caddyfile.caddyscope](deploy/Caddyfile.caddyscope)
-is already wired for GET and POST:
+The bundled [`deploy/Caddyfile.caddyscope`](deploy/Caddyfile.caddyscope) is already wired for GET and POST:
 
 ```caddyfile
 :8080 {
@@ -190,87 +360,72 @@ is already wired for GET and POST:
 }
 ```
 
-- `:8080 { ... }` — Caddy listens on port 8080 inside the container;
-  docker-compose maps that to 8081 on your host.
-- `scopecache { ... }` — every scopecache endpoint is mounted at `/`
-  (so `GET /help`, `GET /tail`, `POST /append`, …).
-- `respond 404` — anything scopecache doesn't recognise → 404.
-- The three knobs inside are capacity limits only; they don't
-  restrict GET/POST. Every verb scopecache supports just works.
+Explanation:
 
-**Example: POST and GET round-trip**
+- `:8080 { ... }` — Caddy listens on port 8080 inside the container; Docker Compose maps that to 8081 on your host.
+- `scopecache { ... }` — ScopeCache endpoints are mounted at `/`, so `GET /help`, `GET /tail`, `POST /append`, and other endpoints are available.
+- `respond 404` — anything ScopeCache does not recognize returns 404.
+- `scope_max_items`, `max_store_mb`, and `max_item_mb` are capacity limits.
+
+### Example: POST and GET round-trip
 
 ```bash
-# write an item
+# Write an item.
 curl -X POST http://localhost:8081/append \
   -H 'Content-Type: application/json' \
   -d '{"scope":"demo","payload":{"msg":"hello"}}'
 
-# read it back
+# Read it back.
 curl 'http://localhost:8081/tail?scope=demo'
 ```
 
-The xcaddy build recipe for your own Caddy binary lives in
-[Dockerfile.caddyscope](Dockerfile.caddyscope).
+The `xcaddy` build recipe for a custom Caddy binary lives in [`Dockerfile.caddyscope`](Dockerfile.caddyscope).
 
+## Quickstart: VPS install
 
-## Quickstart VPS install
-
-A one-shot installer brings up Caddy with the scopecache module on a
-fresh Ubuntu/Debian VPS:
+A one-shot installer brings up Caddy with the ScopeCache module on a fresh Ubuntu/Debian VPS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/VeloxCoding/scopecache/main/scripts/install_caddyscope.sh | sudo bash
 ```
 
-When that finishes:
+When the installer finishes:
 
-- Caddy + scopecache is running on `:80`.
-- The systemd unit `caddy.service` auto-starts on reboot and restarts
-  on crash.
-- `wrk` is installed (for the benchmark step below).
+- Caddy + ScopeCache is running on `:80`.
+- The systemd unit `caddy.service` starts automatically on reboot and restarts on crash.
+- `wrk` is installed for the benchmark step below.
 
-A separate one-liner runs a 5 sec load test against the cache (random GET requests on a 50K item dataset):
+Run a 5-second load test against the cache using random GET requests on a 50K-item dataset:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/VeloxCoding/scopecache/main/scripts/run_benchmark.sh | bash
 ```
 
-For configuration knobs (port, version, capacity caps, benchmark
-tuning), see [docs/install_caddyscope.md](docs/install_caddyscope.md).
-
+For configuration knobs such as port, version, capacity caps, and benchmark tuning, see [`docs/install_caddyscope.md`](docs/install_caddyscope.md).
 
 ## Performance
 
-The results of benchmarks are hardware-dependent. The numbers that are presented in this section were
-measured on an AMD Ryzen AI Max+ 395 with 32 GB of LPDDR5X-8000.
-The same random-seq /get workload on a 4-vCPU / 8 GB VPS reaches
-roughly 90,000 req/s. The point of this comparison is the
-**relative gap between the three routes, not the absolute
-throughput** — and that gap holds across hardware tiers.
+Benchmark results are hardware-dependent. The numbers below were measured on an AMD Ryzen AI Max+ 395 with 32 GB of LPDDR5X-8000.
 
-A side-by-side benchmark comparing three HTTP read paths under
-identical `wrk -t4 -c64 -d5s` load on the same host (50,000-item
-dataset, 10 runs averaged):
+The point of this comparison is the relative gap between request paths, not the absolute throughput.
+
+A side-by-side benchmark compared three HTTP read paths under identical `wrk -t4 -c64 -d5s` load on the same host, using a 50,000-item dataset and 10-run averages:
 
 | Route | Requests/sec | p50 latency |
 |---|---:|---:|
-| Caddy → Node.js → Redis (Unix socket) | 30,414 | 1.870 ms |
-| Caddy/FrankenPHP worker → Redis | 30,543 | 1.969 ms |
-| Caddy → scopecache (in-process) | **281,511** | **0.138 ms** |
+| Caddy -> Node.js -> Redis (Unix socket) | 30,414 | 1.870 ms |
+| Caddy/FrankenPHP worker -> Redis | 30,543 | 1.969 ms |
+| Caddy -> ScopeCache (in-process) | **281,511** | **0.138 ms** |
 
-Scopecache reaches ~9× the throughput of either Redis-backed route.
-The win is **architectural, not a Redis-vs-scopecache speed comparison**:
-running the cache inside the Caddy process removes the application-runtime hop and the Redis roundtrip from the read path entirely. A
-single in-process `getBySeq` lookup itself takes ~43 ns regardless of
-scope size (hash-map, O(1)) — about 23 million lookups per second per
-core.
+ScopeCache reached about 9× the throughput of either Redis-backed route in this benchmark.
+
+Again, this is an architectural comparison, not a claim that Redis itself is slow. Redis is extremely fast internally. The difference here is that ScopeCache removes the application-runtime hop and Redis roundtrip from the selected read path.
 
 ## Status
 
-Pre-1.0. The core HTTP and Go API surfaces are still subject to
-breaking change between minor versions. After v1.0 the core becomes
-semver-stable.
+ScopeCache is pre-1.0.
+
+The core HTTP and Go API surfaces may still change between minor versions. After v1.0, the core API is intended to become semver-stable.
 
 ## Building from source
 
@@ -279,15 +434,20 @@ go build -o scopecache ./cmd/scopecache
 go test ./...
 ```
 
-Module path: `github.com/VeloxCoding/scopecache`. Stdlib only.
+Module path:
+
+```text
+github.com/VeloxCoding/scopecache
+```
+
+ScopeCache currently uses only the Go standard library.
 
 ## Documentation
 
-The full design, endpoint contracts, and architectural rationale live
-in [docs/scopecache-core-rfc.md](docs/scopecache-core-rfc.md).
+The full design, endpoint contracts, and architectural rationale live in [`docs/scopecache-core-rfc.md`](docs/scopecache-core-rfc.md).
 
 ## License
 
-Apache License, Version 2.0. See [LICENSE](LICENSE).
+Apache License, Version 2.0. See [`LICENSE`](LICENSE).
 
 Copyright 2026 VeloxCoding.
