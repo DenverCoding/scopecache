@@ -1,12 +1,10 @@
 # scopecache
 
-ScopeCache is an in-memory cache that runs inside Caddy. It lets Caddy serve selected dynamic reads directly from memory. This can reduce pressure on both the database and application layer.
+ScopeCache is a lightweight in-memory datastore/cache that runs inside Caddy. It lets Caddy serve selected dynamic reads directly from memory. This can reduce pressure on both the database and application layer.
 
-ScopeCache works standalone over plain HTTP, for example over a Unix socket, from any programming language. But it is designed to shine as a Caddy module: when installed inside Caddy, ScopeCache runs in the same process as the webserver, allowing Caddy to serve ScopeCache data directly from memory.
+ScopeCache works standalone over plain HTTP and can be used by any programming language. But it is designed to shine as a Caddy module: when installed inside Caddy, ScopeCache runs in the same process as the webserver, allowing Caddy to serve ScopeCache data directly from memory.
 
 This avoids the usual request path through separate application and storage processes on requests, such as PHP, Node.js, Redis, or a database. In benchmark tests, this direct in-process path served data about 9× faster than routing the same request through Node.js and Redis, even though all services were installed on the same server.
-
-Redis - and similar in-memory data stores - are fast by themselve. But a typical cache 'read' is not just a Redis memory lookup. The request first moves from the webserver into an application process, where a Redis client sends a command to the Redis process over TCP or a Unix socket. Redis returns the data to the application, which then builds the HTTP response and passes it back to the webserver. ScopeCache avoids this roundtrip by running inside Caddy itself.
 
 By removing separate application and storage services from the request path, ScopeCache can reach a latency and throughput profile that traditional multi-service request paths cannot realistically match.
 
@@ -18,11 +16,9 @@ For example, the following request returns the latest 100 reactions for thread `
 https://example.com/tail?scope=thread:123&limit=100
 ```
 
-ScopeCache is not a replacement for Redis or similar in-memory data stores. Those systems offer a much broader feature set: richer data types, more commands, clustering, and mature operational tooling. Their raw performance is not the limiting factor in this comparison. The relevant difference is the request path around them. Even on the same server, crossing application- and service boundaries adds latency and reduces the number of HTTP requests the system can serve.
+ScopeCache is not a replacement for Redis or similar in-memory data stores. Those systems offer a much broader feature set: richer data types, more commands, clustering, and mature operational tooling. Their raw performance is not the limiting factor in this comparison. The relevant difference is the request path around them. 
 
-ScopeCache is not an HTTP response cache like Varnish or Souin. It is a scope-addressed publish cache: your application decides what data is stored, under which scope, and when it is updated or removed.
-
-ScopeCache can also act as a write buffer, with built-in support for change notifications so external scripts can drain, process, or persist events elsewhere.
+ScopeCache is not an HTTP response cache like Varnish or Souin. It is a scope-addressed publish cache: your application decides what data is stored, under which scope, and when it is updated or removed. ScopeCache can also act as a write buffer, with built-in support for change notifications so external scripts can drain, process, or persist events elsewhere.
 
 ## Why ScopeCache Exists
 
@@ -261,7 +257,7 @@ dataset, 10 runs averaged):
 |---|---:|---:|
 | Caddy → Node.js → Redis (Unix socket) | 30,414 | 1.870 ms |
 | Caddy/FrankenPHP worker → Redis | 30,543 | 1.969 ms |
-| Caddy → scopecache (in-process) | **281,511** | **0.138ms ms** |
+| Caddy → scopecache (in-process) | **281,511** | **0.138 ms** |
 
 Scopecache reaches ~9× the throughput of either Redis-backed route.
 The win is **architectural, not a Redis-vs-scopecache speed comparison**:
