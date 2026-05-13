@@ -100,15 +100,205 @@ static inline zend_array *sc_zend_new_array(uint32_t size) {
 static inline zval *sc_hash_str_add(zend_array *ht, const char *key, size_t key_len, zval *zv) {
     return zend_hash_str_add_new(ht, key, key_len, zv);
 }
+
+// sc_add_* — combined zval-construct + hash-insert helpers. Each
+// shaves the second cgo crossing the old two-step pattern paid
+// (ZVAL_* macro + hash_str_add). The Go-side phpAssocAdd* wrappers
+// call straight into these.
+static inline void sc_add_bool(zend_array *ht, const char *key, size_t key_len, int b) {
+    zval zv; ZVAL_BOOL(&zv, b);
+    zend_hash_str_add_new(ht, key, key_len, &zv);
+}
+static inline void sc_add_long(zend_array *ht, const char *key, size_t key_len, zend_long n) {
+    zval zv; ZVAL_LONG(&zv, n);
+    zend_hash_str_add_new(ht, key, key_len, &zv);
+}
+static inline void sc_add_double(zend_array *ht, const char *key, size_t key_len, double d) {
+    zval zv; ZVAL_DOUBLE(&zv, d);
+    zend_hash_str_add_new(ht, key, key_len, &zv);
+}
+static inline void sc_add_null(zend_array *ht, const char *key, size_t key_len) {
+    zval zv; ZVAL_NULL(&zv);
+    zend_hash_str_add_new(ht, key, key_len, &zv);
+}
+static inline void sc_add_string(zend_array *ht, const char *key, size_t key_len,
+                                  const char *str_data, size_t str_len) {
+    zval zv;
+    if (str_len == 0) {
+        ZVAL_EMPTY_STRING(&zv);
+    } else {
+        zend_string *zs = zend_string_init(str_data, str_len, 0);
+        ZVAL_STR(&zv, zs);
+    }
+    zend_hash_str_add_new(ht, key, key_len, &zv);
+}
+static inline void sc_add_arr(zend_array *ht, const char *key, size_t key_len, zend_array *a) {
+    zval zv; ZVAL_ARR(&zv, a);
+    zend_hash_str_add_new(ht, key, key_len, &zv);
+}
+
+// sc_packed_push_arr — append a zend_array as the next packed-index
+// element of an outer packed array. Collapses the two-cgo pattern
+// (ZVAL_ARR + zend_hash_next_index_insert) into one call.
+static inline void sc_packed_push_arr(zend_array *outer, zend_array *inner) {
+    zval zv; ZVAL_ARR(&zv, inner);
+    zend_hash_next_index_insert(outer, &zv);
+}
+
+// sc_zval_str_from_bytes — combine zend_string_init + ZVAL_STR in
+// one cgo call. The hot payload-decode loop sets one string zval
+// per JSON string value; this saves the second crossing.
+static inline void sc_zval_str_from_bytes(zval *zv, const char *data, size_t len) {
+    if (len == 0) {
+        ZVAL_EMPTY_STRING(zv);
+    } else {
+        zend_string *zs = zend_string_init(data, len, 0);
+        ZVAL_STR(zv, zs);
+    }
+}
+
+// sc_packed_push_str_from_bytes — set a zval to a fresh zend_string
+// AND insert it as the next packed-index element. Saves the
+// ZVAL_STR + zend_hash_next_index_insert pair the hand-rolled JSON
+// decoder otherwise pays for every array element.
+static inline void sc_packed_push_str_from_bytes(zend_array *outer, const char *data, size_t len) {
+    zval zv;
+    if (len == 0) {
+        ZVAL_EMPTY_STRING(&zv);
+    } else {
+        zend_string *zs = zend_string_init(data, len, 0);
+        ZVAL_STR(&zv, zs);
+    }
+    zend_hash_next_index_insert(outer, &zv);
+}
+
+// sc_packed_push_long / _push_double / _push_bool / _push_null —
+// same single-cgo pattern for scalar packed-array elements.
+static inline void sc_packed_push_long(zend_array *outer, zend_long n) {
+    zval zv; ZVAL_LONG(&zv, n);
+    zend_hash_next_index_insert(outer, &zv);
+}
+static inline void sc_packed_push_double(zend_array *outer, double d) {
+    zval zv; ZVAL_DOUBLE(&zv, d);
+    zend_hash_next_index_insert(outer, &zv);
+}
+static inline void sc_packed_push_bool(zend_array *outer, int b) {
+    zval zv; ZVAL_BOOL(&zv, b);
+    zend_hash_next_index_insert(outer, &zv);
+}
+static inline void sc_packed_push_null(zend_array *outer) {
+    zval zv; ZVAL_NULL(&zv);
+    zend_hash_next_index_insert(outer, &zv);
+}
+
+// sc_assoc_add_str_from_bytes — same fast-path pair for string-keyed
+// inserts: build a zend_string + add it under `key` in one cgo call.
+// Used by the hand-rolled payload decoder for JSON-object string
+// values.
+static inline void sc_assoc_add_str_from_bytes(zend_array *arr,
+        const char *key, size_t key_len,
+        const char *data, size_t data_len) {
+    zval zv;
+    if (data_len == 0) {
+        ZVAL_EMPTY_STRING(&zv);
+    } else {
+        zend_string *zs = zend_string_init(data, data_len, 0);
+        ZVAL_STR(&zv, zs);
+    }
+    zend_hash_str_add_new(arr, key, key_len, &zv);
+}
+
+// sc_build_item_array assembles the 5-key per-item PHP-array (scope,
+// id|null, seq, ts, payload-or-event) in a single C-side pass —
+// avoiding the 10-15 cgo crossings the field-by-field Go path would
+// produce. Caller pre-decodes the payload into payload_zv (the Go
+// side already pays one JSON-walk; doing the walk in C would require
+// a JSON parser dep). Reserved-scope rename to "event" is handled
+// inline so the caller does not need to know the EventsScopeName
+// string at all.
+//
+// Allocation note: zend_string_init's third arg ("persistent") is 0
+// — request-arena alloc, freed at request shutdown along with the
+// final RETURN_ARR'd array.
+static inline zend_array *sc_build_item_array(
+    const char *scope_data, size_t scope_len,
+    const char *id_data,    size_t id_len,    int id_is_null,
+    zend_long seq, zend_long ts,
+    zval *payload_zv,
+    int is_events_scope
+) {
+    zend_array *arr = zend_new_array(5);
+    zval zv;
+
+    // scope (always set)
+    zend_string *scope_str = zend_string_init(scope_data, scope_len, 0);
+    ZVAL_STR(&zv, scope_str);
+    zend_hash_str_add_new(arr, "scope", sizeof("scope") - 1, &zv);
+
+    // id (null for seq-only items; string otherwise)
+    if (id_is_null) {
+        ZVAL_NULL(&zv);
+    } else {
+        zend_string *id_str = zend_string_init(id_data, id_len, 0);
+        ZVAL_STR(&zv, id_str);
+    }
+    zend_hash_str_add_new(arr, "id", sizeof("id") - 1, &zv);
+
+    ZVAL_LONG(&zv, seq);
+    zend_hash_str_add_new(arr, "seq", sizeof("seq") - 1, &zv);
+
+    ZVAL_LONG(&zv, ts);
+    zend_hash_str_add_new(arr, "ts", sizeof("ts") - 1, &zv);
+
+    // payload / event — payload_zv is consumed by zend_hash_str_add_new
+    // (it copies the zval contents and takes ownership of the refcount).
+    if (is_events_scope) {
+        zend_hash_str_add_new(arr, "event", sizeof("event") - 1, payload_zv);
+    } else {
+        zend_hash_str_add_new(arr, "payload", sizeof("payload") - 1, payload_zv);
+    }
+
+    return arr;
+}
+
+// sc_build_write_ack_array — same one-shot pattern for /append and
+// /upsert response items (no payload, no event renaming). The same
+// id/null switch applies.
+static inline zend_array *sc_build_write_ack_array(
+    const char *scope_data, size_t scope_len,
+    const char *id_data,    size_t id_len,    int id_is_null,
+    zend_long seq, zend_long ts
+) {
+    zend_array *arr = zend_new_array(4);
+    zval zv;
+
+    zend_string *scope_str = zend_string_init(scope_data, scope_len, 0);
+    ZVAL_STR(&zv, scope_str);
+    zend_hash_str_add_new(arr, "scope", sizeof("scope") - 1, &zv);
+
+    if (id_is_null) {
+        ZVAL_NULL(&zv);
+    } else {
+        zend_string *id_str = zend_string_init(id_data, id_len, 0);
+        ZVAL_STR(&zv, id_str);
+    }
+    zend_hash_str_add_new(arr, "id", sizeof("id") - 1, &zv);
+
+    ZVAL_LONG(&zv, seq);
+    zend_hash_str_add_new(arr, "seq", sizeof("seq") - 1, &zv);
+
+    ZVAL_LONG(&zv, ts);
+    zend_hash_str_add_new(arr, "ts", sizeof("ts") - 1, &zv);
+
+    return arr;
+}
 */
 import "C"
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"unsafe"
 
@@ -214,87 +404,73 @@ func phpAssocNew(size int) *C.zend_array {
 	return C.sc_zend_new_array(C.uint32_t(size))
 }
 
-func phpHashStrAdd(arr *C.zend_array, key string, zv *C.zval) {
+// keyPtr returns the (char*, size_t) pair for a Go string key, used
+// by every phpAssocAdd* below. unsafe.StringData aliases the Go
+// string's backing bytes; zend_hash_str_add_new copies the bytes
+// internally before the cgo call returns, so retention is fine.
+func keyPtr(key string) (*C.char, C.size_t) {
 	if len(key) == 0 {
-		return
+		return nil, 0
 	}
-	C.sc_hash_str_add(
-		arr,
-		(*C.char)(unsafe.Pointer(unsafe.StringData(key))),
-		C.size_t(len(key)),
-		zv,
-	)
+	return (*C.char)(unsafe.Pointer(unsafe.StringData(key))), C.size_t(len(key))
 }
 
 func phpAssocAddBool(arr *C.zend_array, key string, val bool) {
-	var zv C.zval
+	kp, kl := keyPtr(key)
 	var b C.int
 	if val {
 		b = 1
 	}
-	C.sc_zval_bool(&zv, b)
-	phpHashStrAdd(arr, key, &zv)
+	C.sc_add_bool(arr, kp, kl, b)
 }
 
 func phpAssocAddLong(arr *C.zend_array, key string, val int64) {
-	var zv C.zval
-	C.sc_zval_long(&zv, C.zend_long(val))
-	phpHashStrAdd(arr, key, &zv)
+	kp, kl := keyPtr(key)
+	C.sc_add_long(arr, kp, kl, C.zend_long(val))
 }
 
 func phpAssocAddDouble(arr *C.zend_array, key string, val float64) {
-	var zv C.zval
-	C.sc_zval_double(&zv, C.double(val))
-	phpHashStrAdd(arr, key, &zv)
+	kp, kl := keyPtr(key)
+	C.sc_add_double(arr, kp, kl, C.double(val))
 }
 
 func phpAssocAddNull(arr *C.zend_array, key string) {
-	var zv C.zval
-	C.sc_zval_null(&zv)
-	phpHashStrAdd(arr, key, &zv)
+	kp, kl := keyPtr(key)
+	C.sc_add_null(arr, kp, kl)
 }
 
 func phpAssocAddString(arr *C.zend_array, key string, val string) {
-	var zv C.zval
-	if len(val) == 0 {
-		C.sc_zval_empty_string(&zv)
-	} else {
-		zs := C.zend_string_init(
-			(*C.char)(unsafe.Pointer(unsafe.StringData(val))),
-			C.size_t(len(val)),
-			C._Bool(false),
-		)
-		C.sc_zval_str(&zv, zs)
+	kp, kl := keyPtr(key)
+	var sp *C.char
+	if len(val) > 0 {
+		sp = (*C.char)(unsafe.Pointer(unsafe.StringData(val)))
 	}
-	phpHashStrAdd(arr, key, &zv)
+	C.sc_add_string(arr, kp, kl, sp, C.size_t(len(val)))
 }
 
 func phpAssocAddArray(arr *C.zend_array, key string, val *C.zend_array) {
-	var zv C.zval
-	C.sc_zval_arr(&zv, val)
-	phpHashStrAdd(arr, key, &zv)
+	kp, kl := keyPtr(key)
+	C.sc_add_arr(arr, kp, kl, val)
 }
 
 func phpAssocAddZval(arr *C.zend_array, key string, zv *C.zval) {
-	phpHashStrAdd(arr, key, zv)
+	kp, kl := keyPtr(key)
+	C.sc_hash_str_add(arr, kp, kl, zv)
 }
 
 // payloadToZval decodes a stored item's JSON payload bytes and writes
-// the resulting PHP value into zv. Mirrors what `json_decode($body, true)`
-// would produce in PHP on the same bytes — object → assoc array, array →
-// packed array, number → int when no decimal/exponent in source else
-// float, string/bool/null map directly.
+// the resulting PHP value into zv. Hand-rolled byte-walker — bypasses
+// json.Decoder entirely so we avoid per-call Decoder/Reader allocation
+// and the interface{}-boxed Token() return type.
 //
-// Token-walked (not json.Unmarshal-into-any) so JSON-object key order
-// is preserved on the way into the PHP array. PHP's strict-equality
-// operator on assoc arrays compares insertion order; a decoder that
-// went through map[string]any would lose source order to Go's map-
-// iteration randomisation, breaking the `===` parity we promise.
-//
-// json.Decoder.UseNumber() preserves the int-vs-float distinction the
-// JSON source had; the default float64 decode would silently widen
-// every integer payload (`42` → float 42.0 → PHP float when emitted),
-// breaking the json_decode parity too.
+// Correctness contract:
+//   - Object key order is preserved (we iterate source bytes in order).
+//   - Numbers without `.` / `e` / `E` become PHP int via ZVAL_LONG;
+//     others become PHP float via ZVAL_DOUBLE. Matches `json_decode`.
+//   - Strings without backslash escapes take the zero-copy fast path
+//     (alias the source bytes into a fresh zend_string in one cgo).
+//     Strings with escapes fall through to encoding/json for the
+//     escape-decoding step — slower but still correct.
 //
 // Empty input (defensive — validatePayload rejects this upstream)
 // writes PHP null.
@@ -303,169 +479,417 @@ func payloadToZval(payload json.RawMessage, zv *C.zval) {
 		C.sc_zval_null(zv)
 		return
 	}
-	dec := json.NewDecoder(bytes.NewReader(payload))
-	dec.UseNumber()
-	if err := decodeNextToZval(dec, zv); err != nil {
+	p := jsonParser{b: payload}
+	if err := p.parseValue(zv); err != nil {
 		C.sc_zval_null(zv)
 	}
 }
 
-// decodeNextToZval pulls one JSON value (scalar, object, or array)
-// from dec and writes it into zv. Recurses into nested structures
-// via the same function, consuming the matching closing delimiter
-// before returning.
-func decodeNextToZval(dec *json.Decoder, zv *C.zval) error {
-	tok, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	return tokenToZval(dec, tok, zv)
+type jsonParser struct {
+	b   []byte
+	pos int
 }
 
-func tokenToZval(dec *json.Decoder, tok json.Token, zv *C.zval) error {
-	switch t := tok.(type) {
-	case json.Delim:
-		switch t {
-		case '{':
-			arr := C.sc_zend_new_array(C.uint32_t(8))
-			for dec.More() {
-				keyTok, err := dec.Token()
-				if err != nil {
-					return err
-				}
-				key, ok := keyTok.(string)
-				if !ok {
-					return fmt.Errorf("payload decode: object key is not a string (got %T)", keyTok)
-				}
-				var valZv C.zval
-				if err := decodeNextToZval(dec, &valZv); err != nil {
-					return err
-				}
-				phpHashStrAdd(arr, key, &valZv)
-			}
-			if _, err := dec.Token(); err != nil { // consume '}'
-				return err
-			}
-			C.sc_zval_arr(zv, arr)
-			return nil
-		case '[':
-			arr := C.sc_zend_new_array(C.uint32_t(8))
-			for dec.More() {
-				var elemZv C.zval
-				if err := decodeNextToZval(dec, &elemZv); err != nil {
-					return err
-				}
-				C.zend_hash_next_index_insert(arr, &elemZv)
-			}
-			if _, err := dec.Token(); err != nil { // consume ']'
-				return err
-			}
-			C.sc_zval_arr(zv, arr)
-			return nil
+func (p *jsonParser) skipWS() {
+	for p.pos < len(p.b) {
+		switch p.b[p.pos] {
+		case ' ', '\t', '\n', '\r':
+			p.pos++
 		default:
-			return fmt.Errorf("payload decode: unexpected delimiter %v", t)
+			return
 		}
-	case nil:
+	}
+}
+
+func (p *jsonParser) parseValue(zv *C.zval) error {
+	p.skipWS()
+	if p.pos >= len(p.b) {
+		return fmt.Errorf("payload decode: unexpected EOF")
+	}
+	c := p.b[p.pos]
+	switch {
+	case c == '{':
+		return p.parseObject(zv)
+	case c == '[':
+		return p.parseArray(zv)
+	case c == '"':
+		return p.parseStringValue(zv)
+	case c == 't':
+		return p.parseLiteral([]byte("true"), zv, parseLiteralTrue)
+	case c == 'f':
+		return p.parseLiteral([]byte("false"), zv, parseLiteralFalse)
+	case c == 'n':
+		return p.parseLiteral([]byte("null"), zv, parseLiteralNull)
+	case c == '-' || (c >= '0' && c <= '9'):
+		return p.parseNumber(zv)
+	default:
+		return fmt.Errorf("payload decode: unexpected byte %q at pos %d", c, p.pos)
+	}
+}
+
+const (
+	parseLiteralTrue  = 1
+	parseLiteralFalse = 2
+	parseLiteralNull  = 3
+)
+
+func (p *jsonParser) parseLiteral(want []byte, zv *C.zval, kind int) error {
+	if p.pos+len(want) > len(p.b) {
+		return fmt.Errorf("payload decode: truncated literal at pos %d", p.pos)
+	}
+	for i, b := range want {
+		if p.b[p.pos+i] != b {
+			return fmt.Errorf("payload decode: bad literal at pos %d", p.pos)
+		}
+	}
+	p.pos += len(want)
+	switch kind {
+	case parseLiteralTrue:
+		C.sc_zval_bool(zv, 1)
+	case parseLiteralFalse:
+		C.sc_zval_bool(zv, 0)
+	default:
 		C.sc_zval_null(zv)
-		return nil
-	case bool:
-		var b C.int
-		if t {
-			b = 1
+	}
+	return nil
+}
+
+func (p *jsonParser) parseNumber(zv *C.zval) error {
+	start := p.pos
+	if p.b[p.pos] == '-' {
+		p.pos++
+	}
+	for p.pos < len(p.b) && p.b[p.pos] >= '0' && p.b[p.pos] <= '9' {
+		p.pos++
+	}
+	isFloat := false
+	if p.pos < len(p.b) && p.b[p.pos] == '.' {
+		isFloat = true
+		p.pos++
+		for p.pos < len(p.b) && p.b[p.pos] >= '0' && p.b[p.pos] <= '9' {
+			p.pos++
 		}
-		C.sc_zval_bool(zv, b)
-		return nil
-	case json.Number:
-		s := string(t)
-		if strings.ContainsAny(s, ".eE") {
-			if f, err := strconv.ParseFloat(s, 64); err == nil {
-				C.sc_zval_double(zv, C.double(f))
-				return nil
-			}
+	}
+	if p.pos < len(p.b) && (p.b[p.pos] == 'e' || p.b[p.pos] == 'E') {
+		isFloat = true
+		p.pos++
+		if p.pos < len(p.b) && (p.b[p.pos] == '+' || p.b[p.pos] == '-') {
+			p.pos++
 		}
+		for p.pos < len(p.b) && p.b[p.pos] >= '0' && p.b[p.pos] <= '9' {
+			p.pos++
+		}
+	}
+	s := unsafe.String(unsafe.SliceData(p.b[start:p.pos]), p.pos-start)
+	if !isFloat {
 		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
 			C.sc_zval_long(zv, C.zend_long(i))
 			return nil
 		}
-		if f, err := strconv.ParseFloat(s, 64); err == nil {
-			C.sc_zval_double(zv, C.double(f))
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return fmt.Errorf("payload decode: bad number %q", s)
+	}
+	C.sc_zval_double(zv, C.double(f))
+	return nil
+}
+
+// parseRawString locates the start and end of a JSON string token,
+// returning the byte slice between the quotes plus a flag indicating
+// whether the slice contains any backslash-escape sequences. On the
+// no-escape fast path the caller can use the raw bytes directly; on
+// the slow path encoding/json.Unmarshal handles escape decoding.
+//
+// p.pos must point at the opening `"`. On return, p.pos is one past
+// the closing `"`.
+func (p *jsonParser) parseRawString() (rawStart, rawEnd int, hasEscape bool, err error) {
+	if p.pos >= len(p.b) || p.b[p.pos] != '"' {
+		return 0, 0, false, fmt.Errorf("payload decode: expected string at pos %d", p.pos)
+	}
+	p.pos++ // past opening quote
+	rawStart = p.pos
+	for p.pos < len(p.b) {
+		c := p.b[p.pos]
+		switch c {
+		case '"':
+			rawEnd = p.pos
+			p.pos++ // past closing quote
+			return rawStart, rawEnd, hasEscape, nil
+		case '\\':
+			hasEscape = true
+			p.pos++
+			if p.pos < len(p.b) {
+				p.pos++ // skip the escaped byte
+			}
+		default:
+			p.pos++
+		}
+	}
+	return 0, 0, false, fmt.Errorf("payload decode: unterminated string")
+}
+
+func (p *jsonParser) parseStringValue(zv *C.zval) error {
+	start, end, hasEscape, err := p.parseRawString()
+	if err != nil {
+		return err
+	}
+	if !hasEscape {
+		if end == start {
+			C.sc_zval_empty_string(zv)
 			return nil
 		}
-		C.sc_zval_null(zv)
+		C.sc_zval_str_from_bytes(
+			zv,
+			(*C.char)(unsafe.Pointer(&p.b[start])),
+			C.size_t(end-start),
+		)
 		return nil
-	case string:
-		if len(t) == 0 {
-			C.sc_zval_empty_string(zv)
-		} else {
-			zs := C.zend_string_init(
-				(*C.char)(unsafe.Pointer(unsafe.StringData(t))),
-				C.size_t(len(t)),
-				C._Bool(false),
-			)
-			C.sc_zval_str(zv, zs)
+	}
+	// Slow path: re-decode through encoding/json so escape semantics
+	// (\n, \t, \uXXXX, etc.) stay identical to PHP json_decode.
+	var s string
+	if err := json.Unmarshal(p.b[start-1:end+1], &s); err != nil {
+		return err
+	}
+	if len(s) == 0 {
+		C.sc_zval_empty_string(zv)
+		return nil
+	}
+	C.sc_zval_str_from_bytes(
+		zv,
+		(*C.char)(unsafe.Pointer(unsafe.StringData(s))),
+		C.size_t(len(s)),
+	)
+	return nil
+}
+
+func (p *jsonParser) parseObject(zv *C.zval) error {
+	p.pos++ // skip '{'
+	arr := C.sc_zend_new_array(8)
+	p.skipWS()
+	if p.pos < len(p.b) && p.b[p.pos] == '}' {
+		p.pos++
+		C.sc_zval_arr(zv, arr)
+		return nil
+	}
+	for {
+		p.skipWS()
+		// Key — always a JSON string.
+		ks, ke, kEsc, err := p.parseRawString()
+		if err != nil {
+			return err
 		}
+		var keyData *C.char
+		var keyLen C.size_t
+		var keyHolder string // alive across the cgo call when escape path is hit
+		if !kEsc {
+			if ke > ks {
+				keyData = (*C.char)(unsafe.Pointer(&p.b[ks]))
+			}
+			keyLen = C.size_t(ke - ks)
+		} else {
+			if err := json.Unmarshal(p.b[ks-1:ke+1], &keyHolder); err != nil {
+				return err
+			}
+			if len(keyHolder) > 0 {
+				keyData = (*C.char)(unsafe.Pointer(unsafe.StringData(keyHolder)))
+			}
+			keyLen = C.size_t(len(keyHolder))
+		}
+		p.skipWS()
+		if p.pos >= len(p.b) || p.b[p.pos] != ':' {
+			return fmt.Errorf("payload decode: expected ':' at pos %d", p.pos)
+		}
+		p.pos++
+		// Value-specific fast paths inline the (parseValue + insert)
+		// pair into one cgo call where the value type is trivial.
+		p.skipWS()
+		if p.pos >= len(p.b) {
+			return fmt.Errorf("payload decode: unexpected EOF")
+		}
+		if p.b[p.pos] == '"' {
+			vs, ve, vEsc, err := p.parseRawString()
+			if err != nil {
+				return err
+			}
+			if !vEsc {
+				var vp *C.char
+				if ve > vs {
+					vp = (*C.char)(unsafe.Pointer(&p.b[vs]))
+				}
+				C.sc_assoc_add_str_from_bytes(arr, keyData, keyLen, vp, C.size_t(ve-vs))
+			} else {
+				var s string
+				if err := json.Unmarshal(p.b[vs-1:ve+1], &s); err != nil {
+					return err
+				}
+				var sp *C.char
+				if len(s) > 0 {
+					sp = (*C.char)(unsafe.Pointer(unsafe.StringData(s)))
+				}
+				C.sc_assoc_add_str_from_bytes(arr, keyData, keyLen, sp, C.size_t(len(s)))
+			}
+		} else {
+			var valZv C.zval
+			if err := p.parseValue(&valZv); err != nil {
+				return err
+			}
+			C.sc_hash_str_add(arr, keyData, keyLen, &valZv)
+		}
+		_ = keyHolder // keep alive for cgo call duration
+		p.skipWS()
+		if p.pos < len(p.b) {
+			switch p.b[p.pos] {
+			case ',':
+				p.pos++
+				continue
+			case '}':
+				p.pos++
+				C.sc_zval_arr(zv, arr)
+				return nil
+			}
+		}
+		return fmt.Errorf("payload decode: expected ',' or '}' at pos %d", p.pos)
+	}
+}
+
+func (p *jsonParser) parseArray(zv *C.zval) error {
+	p.pos++ // skip '['
+	arr := C.sc_zend_new_array(8)
+	p.skipWS()
+	if p.pos < len(p.b) && p.b[p.pos] == ']' {
+		p.pos++
+		C.sc_zval_arr(zv, arr)
 		return nil
-	default:
-		C.sc_zval_null(zv)
-		return nil
+	}
+	for {
+		p.skipWS()
+		if p.pos >= len(p.b) {
+			return fmt.Errorf("payload decode: unexpected EOF")
+		}
+		// Element-specific fast paths same as parseObject.
+		if p.b[p.pos] == '"' {
+			vs, ve, vEsc, err := p.parseRawString()
+			if err != nil {
+				return err
+			}
+			if !vEsc {
+				var vp *C.char
+				if ve > vs {
+					vp = (*C.char)(unsafe.Pointer(&p.b[vs]))
+				}
+				C.sc_packed_push_str_from_bytes(arr, vp, C.size_t(ve-vs))
+			} else {
+				var s string
+				if err := json.Unmarshal(p.b[vs-1:ve+1], &s); err != nil {
+					return err
+				}
+				var sp *C.char
+				if len(s) > 0 {
+					sp = (*C.char)(unsafe.Pointer(unsafe.StringData(s)))
+				}
+				C.sc_packed_push_str_from_bytes(arr, sp, C.size_t(len(s)))
+			}
+		} else {
+			var valZv C.zval
+			if err := p.parseValue(&valZv); err != nil {
+				return err
+			}
+			C.zend_hash_next_index_insert(arr, &valZv)
+		}
+		p.skipWS()
+		if p.pos < len(p.b) {
+			switch p.b[p.pos] {
+			case ',':
+				p.pos++
+				continue
+			case ']':
+				p.pos++
+				C.sc_zval_arr(zv, arr)
+				return nil
+			}
+		}
+		return fmt.Errorf("payload decode: expected ',' or ']' at pos %d", p.pos)
 	}
 }
 
 // buildItemAssoc constructs the per-item PHP-array used inside the
 // `item` key on /get and as each element of `items` on /head and
-// /tail. Includes the (decoded) payload. Mirrors Item.MarshalJSON's
-// wire shape (scope/id/seq/ts + payload-or-event) from §4.2 of the
-// RFC.
+// /tail. One cgo call into sc_build_item_array does the whole
+// HashTable assembly (5 fields + payload). The Go side only pays
+// the JSON-decode walk for the payload — that has to happen
+// somewhere, and Go's parser is the path of least resistance.
+//
+// Strings (scope, id) cross as aliased pointers; sc_build_item_array
+// passes them to zend_string_init which copies the bytes into the
+// PHP arena. Safe even though the Go strings may not live past the
+// cgo return.
 func buildItemAssoc(item scopecache.Item) *C.zend_array {
-	arr := phpAssocNew(5)
-	phpAssocAddString(arr, "scope", item.Scope)
-	if item.ID == "" {
-		phpAssocAddNull(arr, "id")
-	} else {
-		phpAssocAddString(arr, "id", item.ID)
-	}
-	phpAssocAddLong(arr, "seq", int64(item.Seq))
-	phpAssocAddLong(arr, "ts", item.Ts)
+	var payloadZv C.zval
+	payloadToZval(item.Payload, &payloadZv)
 
-	// payload renames to "event" for items in the reserved _events
-	// scope — see types.go Item.MarshalJSON for the rationale.
-	payloadKey := "payload"
-	if item.Scope == scopecache.EventsScopeName {
-		payloadKey = "event"
+	var (
+		scopeData *C.char
+		idData    *C.char
+		idLen     C.size_t
+		idIsNull  C.int = 1
+	)
+	if len(item.Scope) > 0 {
+		scopeData = (*C.char)(unsafe.Pointer(unsafe.StringData(item.Scope)))
 	}
-	var zv C.zval
-	payloadToZval(item.Payload, &zv)
-	phpAssocAddZval(arr, payloadKey, &zv)
-	return arr
+	if item.ID != "" {
+		idData = (*C.char)(unsafe.Pointer(unsafe.StringData(item.ID)))
+		idLen = C.size_t(len(item.ID))
+		idIsNull = 0
+	}
+	var isEvents C.int
+	if item.Scope == scopecache.EventsScopeName {
+		isEvents = 1
+	}
+	return C.sc_build_item_array(
+		scopeData, C.size_t(len(item.Scope)),
+		idData, idLen, idIsNull,
+		C.zend_long(item.Seq), C.zend_long(item.Ts),
+		&payloadZv,
+		isEvents,
+	)
 }
 
 // buildWriteAckAssoc constructs the `item` sub-array for /append and
-// /upsert responses. Same shape as buildItemAssoc minus the payload —
-// the client just supplied it on the way in, so echoing it would
-// double the wire cost. Matches writeAck in handlers_write.go.
+// /upsert responses. Same one-shot pattern as buildItemAssoc minus
+// the payload — the client just supplied it on the way in.
 func buildWriteAckAssoc(item scopecache.Item) *C.zend_array {
-	arr := phpAssocNew(4)
-	phpAssocAddString(arr, "scope", item.Scope)
-	if item.ID == "" {
-		phpAssocAddNull(arr, "id")
-	} else {
-		phpAssocAddString(arr, "id", item.ID)
+	var (
+		scopeData *C.char
+		idData    *C.char
+		idLen     C.size_t
+		idIsNull  C.int = 1
+	)
+	if len(item.Scope) > 0 {
+		scopeData = (*C.char)(unsafe.Pointer(unsafe.StringData(item.Scope)))
 	}
-	phpAssocAddLong(arr, "seq", int64(item.Seq))
-	phpAssocAddLong(arr, "ts", item.Ts)
-	return arr
+	if item.ID != "" {
+		idData = (*C.char)(unsafe.Pointer(unsafe.StringData(item.ID)))
+		idLen = C.size_t(len(item.ID))
+		idIsNull = 0
+	}
+	return C.sc_build_write_ack_array(
+		scopeData, C.size_t(len(item.Scope)),
+		idData, idLen, idIsNull,
+		C.zend_long(item.Seq), C.zend_long(item.Ts),
+	)
 }
 
 // buildItemsPackedArray constructs the inner `items` packed-array of
 // /head and /tail responses — every element is the full item shape
-// from buildItemAssoc (scope/id/seq/ts/payload). Returns an empty
-// packed array when `items` is empty.
+// from buildItemAssoc (scope/id/seq/ts/payload). Uses sc_packed_push_arr
+// to collapse the ZVAL_ARR + zend_hash_next_index_insert pair into
+// one cgo call per item.
 func buildItemsPackedArray(items []scopecache.Item) *C.zend_array {
 	arr := C.sc_zend_new_array(C.uint32_t(len(items)))
-	var zv C.zval
 	for i := range items {
-		C.sc_zval_arr(&zv, buildItemAssoc(items[i]))
-		C.zend_hash_next_index_insert(arr, &zv)
+		C.sc_packed_push_arr(arr, buildItemAssoc(items[i]))
 	}
 	return arr
 }
@@ -497,7 +921,6 @@ func buildItemsEnvelope(hit bool, items []scopecache.Item, truncated bool, withO
 // since reserved scopes are infrastructure, not user-facing reads).
 func buildReservedScopesArray(rows []scopecache.ReservedScopeEntry) *C.zend_array {
 	arr := C.sc_zend_new_array(C.uint32_t(len(rows)))
-	var zv C.zval
 	for i := range rows {
 		row := phpAssocNew(6)
 		phpAssocAddString(row, "scope", rows[i].Scope)
@@ -506,8 +929,7 @@ func buildReservedScopesArray(rows []scopecache.ReservedScopeEntry) *C.zend_arra
 		phpAssocAddDouble(row, "approx_scope_mb", float64(rows[i].ApproxScopeMB)/1048576.0)
 		phpAssocAddLong(row, "created_ts", rows[i].CreatedTS)
 		phpAssocAddLong(row, "last_write_ts", rows[i].LastWriteTS)
-		C.sc_zval_arr(&zv, row)
-		C.zend_hash_next_index_insert(arr, &zv)
+		C.sc_packed_push_arr(arr, row)
 	}
 	return arr
 }
@@ -518,7 +940,6 @@ func buildReservedScopesArray(rows []scopecache.ReservedScopeEntry) *C.zend_arra
 // read_count_total) that /stats's reserved_scopes block omits.
 func buildScopeListPackedArray(rows []scopecache.ScopeListEntry) *C.zend_array {
 	arr := C.sc_zend_new_array(C.uint32_t(len(rows)))
-	var zv C.zval
 	for i := range rows {
 		row := phpAssocNew(8)
 		phpAssocAddString(row, "scope", rows[i].Scope)
@@ -529,8 +950,7 @@ func buildScopeListPackedArray(rows []scopecache.ScopeListEntry) *C.zend_array {
 		phpAssocAddLong(row, "last_write_ts", rows[i].LastWriteTS)
 		phpAssocAddLong(row, "last_access_ts", rows[i].LastAccessTS)
 		phpAssocAddLong(row, "read_count_total", int64(rows[i].ReadCountTotal))
-		C.sc_zval_arr(&zv, row)
-		C.zend_hash_next_index_insert(arr, &zv)
+		C.sc_packed_push_arr(arr, row)
 	}
 	return arr
 }

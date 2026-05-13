@@ -52,11 +52,15 @@ for ($i = 0; $i < $TAIL_LIMIT; $i++) {
     scopecache_append($tail_scope, "item-$i", $payload);
 }
 
-// Sanity probes.
-if (scopecache_get($get_scope, 'item') === null) die("seed FAILED: get scope empty\n");
+// Sanity probes — envelope-shape aware.
+$probe_get = scopecache_get($get_scope, 'item');
+if (!is_array($probe_get) || ($probe_get['hit'] ?? null) !== true) {
+    die("seed FAILED: get probe envelope " . var_export($probe_get, true) . "\n");
+}
 $probe_tail = scopecache_tail($tail_scope, $TAIL_LIMIT);
-if (!is_array($probe_tail) || count($probe_tail) !== $TAIL_LIMIT) {
-    die("seed FAILED: tail scope has " . (is_array($probe_tail) ? count($probe_tail) : 'null') . " items, expected $TAIL_LIMIT\n");
+$probe_count = $probe_tail['count'] ?? -1;
+if (!is_array($probe_tail) || $probe_count !== $TAIL_LIMIT) {
+    die("seed FAILED: tail scope count=$probe_count, expected $TAIL_LIMIT\n");
 }
 
 // --- Report header --------------------------------------------------------
