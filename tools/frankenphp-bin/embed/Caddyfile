@@ -20,5 +20,12 @@
         max_item_mb     1
     }
 
+    # Short-circuit browser auto-fetches so they do NOT fall through
+    # to index.php (which would re-fire scopecache_append on every
+    # /favicon.ico hit, doubling the apparent append-count per
+    # pagina-load). 204 = no content, browser keeps quiet.
+    respond /favicon.ico 204
+    respond /robots.txt  204
+
     php_server
 }

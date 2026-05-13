@@ -235,6 +235,32 @@ and override at startup:
 
 …with a Caddyfile whose `root` points at a real directory on disk.
 
+### Caddyfile syntax pitfall: inline-braces in `handle`
+
+Caddy parses `handle /favicon.ico { respond 204 }` as an error:
+`Unexpected next token after '{' on same line`. Brace-blocks for the
+`handle` directive must be multi-line:
+
+```caddyfile
+handle /favicon.ico {
+    respond 204
+}
+```
+
+Or — simpler for one-liners — use the direct `respond` form with a
+path matcher:
+
+```caddyfile
+respond /favicon.ico 204
+respond /robots.txt  204
+```
+
+The embedded Caddyfile uses the latter shape for that reason.
+Without these short-circuits, browser auto-fetches (favicon,
+robots, prefetch) fall through to `index.php` because `php_server`
+has an SPA-style fallback — every fall-through reruns the demo
+logic and triggers an extra `scopecache_append()`.
+
 ## Where the binary goes after building
 
 `build.sh` writes to [`examples/frankenphp-bin/`](../../examples/frankenphp-bin/)

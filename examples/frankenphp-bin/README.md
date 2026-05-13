@@ -48,7 +48,7 @@ Open `http://localhost:8080/` (or whichever port you mapped).
 
 Every refresh:
 
-1. Picks a random Dutch noun.
+1. Picks a random noun.
 2. Calls `scopecache_append('demo', '', json_encode(['word'=>..., 'ts'=>...]))`
    — **direct cgo into the in-process `*Gateway`**, no HTTP.
 3. Calls `scopecache_tail('demo', 10)` and renders the last 10 items
