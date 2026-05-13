@@ -12,6 +12,7 @@ extension — the extension itself (the Go source) lives in
 ./validate.sh        # full correctness suite (~5-10 s, ~170 checks)
 ./bench.sh           # per-call latency + throughput (get/tail/append @ 54 B)
 ./bench.sh --sweep   # scopecache_get cost across payload sizes
+./compare.sh         # PHP get cost: Redis vs Memcached vs scopecache (cgo)
 ```
 
 ## What lives here
@@ -19,11 +20,12 @@ extension — the extension itself (the Go source) lives in
 | file | role |
 |---|---|
 | [`Dockerfile.gen`](Dockerfile.gen) | Cached generator image — PHP-ZTS headers + `frankenphp-gen` (built from FrankenPHP master so `extension-init` is present) + `xcaddy` + the right `GEN_STUB_SCRIPT` env path. ~3 min cold, instant warm. |
-| [`Dockerfile.bench`](Dockerfile.bench) | Runtime image adding `phpredis` + `memcached` C-extensions to stock FrankenPHP — reserved for future Redis/Memcached comparison runs. |
+| [`Dockerfile.bench`](Dockerfile.bench) | Runtime image adding `phpredis` + `memcached` C-extensions to stock FrankenPHP — used by `compare.sh`. |
 | [`build.sh`](build.sh) | Two-stage build orchestrator: builds the cached image (stage 1), runs it with the addon source + scopecache core bind-mounted to produce `dist/frankenphp` (stage 2). |
 | [`smoke.sh`](smoke.sh) + [`test.php`](test.php) | Post-build sanity — boots the binary, exercises a few cgo calls, asserts the shared `*Gateway` is reachable from PHP. |
 | [`validate.sh`](validate.sh) + [`validate.php`](validate.php) | Full correctness suite covering all 19 //export_php functions: envelope-shape checks, payload-decode round-trips, error envelopes, byte-exact warm/rebuild, etc. |
 | [`bench.sh`](bench.sh) + [`bench.php`](bench.php) | Per-call latency + throughput for the cgo hot path (`scopecache_get` / `_tail` / `_append`). `bench.sh --sweep` reuses the same PHP to chart `_get` cost across payload sizes 54 B → 10 KiB. |
+| [`compare.sh`](compare.sh) + [`compare.php`](compare.php) | PHP get cost across three backends: Redis (cold + warm), Memcached (cold + warm), scopecache (cgo). Two payload sizes: 54 B + 5 KiB. Spins up Redis + Memcached side-containers on a private Docker network. |
 | [`Caddyfile.bench`](Caddyfile.bench) | Runtime config used by every script above. Exposes both paths in one process: scopecache as a Caddy module on `:8080` plus `php_server` for the bench PHP files. |
 | `dist/` (gitignored) | Build output — `dist/frankenphp` is a FrankenPHP binary with the scopecache extension baked in. |
 

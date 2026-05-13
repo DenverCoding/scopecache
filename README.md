@@ -197,7 +197,7 @@ That matters. A PHP extension written in Go can call ScopeCache without leaving 
 
 There is still a PHP-to-Go extension boundary, including type conversion. But the path is much shorter than a typical PHP-to-Redis lookup.
 
-In an initial benchmark, a `scopecache_get()` call exposed through a Go extension took about 0.3 µs on average. A single PHP-to-Redis lookup that opened and closed its connection took roughly 581 µs. With a persistent Redis connection, that dropped to about 126 µs in steady state.
+In an initial benchmark, a `scopecache_get()` call exposed through a Go extension took about 0.7 µs on average. A single PHP-to-Redis lookup that opened and closed its connection took roughly 581 µs. With a persistent Redis connection, that dropped to about 126 µs in steady state.
 
 Even in that best-case Redis scenario, the measured PHP-to-Redis access path was still about 452× slower than the equivalent in-process ScopeCache call.
 
