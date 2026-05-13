@@ -116,7 +116,6 @@ func (api *API) handleDeleteScope(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, http.StatusOK, DeleteScopeResponse{
 		OK:           true,
 		Hit:          deleted,
-		DeletedScope: deleted,
 		DeletedItems: deletedItems,
 		DurationUs:   time.Since(started).Microseconds(),
 	})

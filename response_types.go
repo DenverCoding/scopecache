@@ -76,14 +76,13 @@ type DeleteResponse struct {
 
 // DeleteScopeResponse is the body of a successful POST /delete_scope.
 //
-// NB: `hit` AND `deleted_scope` carry the SAME bool value (the
-// "did-the-scope-exist" flag from store.deleteScope). Historical
-// shape — two keys for the same data — preserved for Phase A
-// byte-identical behaviour. Phase B is allowed to drop one of them.
+// `hit` reflects "did the scope exist before this call" — distinct
+// from /delete and /delete_up_to where `hit` means "anything was
+// deleted". On /delete_scope an existing-but-already-empty scope
+// still counts as a hit (the scope is gone after the call).
 type DeleteScopeResponse struct {
 	OK           bool  `json:"ok"`
 	Hit          bool  `json:"hit"`
-	DeletedScope bool  `json:"deleted_scope"`
 	DeletedItems int   `json:"deleted_items"`
 	DurationUs   int64 `json:"duration_us"`
 }
