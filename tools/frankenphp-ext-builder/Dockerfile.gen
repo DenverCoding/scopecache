@@ -1,7 +1,8 @@
-# Dockerfile.gen — cached build environment for the scopecache
-# FrankenPHP extension. Built once (~3 min), reused on every
-# subsequent `build.sh` run (~0 sec to validate the cache, then the
-# actual extension build runs).
+# Dockerfile.gen — cached build environment for FrankenPHP-extension
+# builds (Go-flavoured extensions written against the
+# `//export_php:` directive). Build once (~3 min), reuse on every
+# subsequent extension build (~0 sec to validate the layer cache,
+# then the actual extension build runs).
 #
 # What this image bakes in:
 #
@@ -30,7 +31,7 @@
 #
 # Force a clean rebuild:
 #
-#   docker build --no-cache -t scopecache-ext-builder:latest \
+#   docker build --no-cache -t frankenphp-ext-builder:latest \
 #       -f Dockerfile.gen .
 #
 # Stage 1: source for xcaddy. Extracted via COPY --from below.

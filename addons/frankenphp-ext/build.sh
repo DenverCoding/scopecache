@@ -3,10 +3,10 @@
 # compiled in. Two-stage flow:
 #
 #   1. Build (or reuse) the cached generator image defined in
-#      Dockerfile.gen — that image carries frankenphp-gen + xcaddy +
-#      gen_stub.php + the PHP-ZTS headers. ~3 min first time, then
-#      docker's layer cache makes subsequent runs instant. If you
-#      want a clean rebuild of the image: ./build.sh --rebuild-gen-image
+#      tools/frankenphp-ext-builder/Dockerfile.gen — that image carries
+#      frankenphp-gen + xcaddy + gen_stub.php + the PHP-ZTS headers.
+#      ~3 min first time, then docker's layer cache makes subsequent
+#      runs instant. For a clean rebuild: ./build.sh --rebuild-gen-image
 #
 #   2. Run that image once with the scopecache source + this extension
 #      source bind-mounted, generate the cgo wrappers, and `xcaddy
@@ -16,8 +16,8 @@
 # Cold-cold (no cached image, no docker layer cache): ~10-15 min.
 # Warm (image cached, code edited):                   ~1-3 min.
 #
-# See CLAUDE_PHPEXTENSION_IN_GO.md in the repo root for the catalog
-# of build-chain pitfalls each step exists to dodge.
+# Build-chain pitfalls (why every sed-patch below exists): see
+# tools/frankenphp-ext-builder/README.md.
 #
 # Usage:
 #   ./build.sh
@@ -27,8 +27,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BUILDER_DIR="$REPO_ROOT/tools/frankenphp-ext-builder"
 DIST_DIR="$SCRIPT_DIR/dist"
-GEN_IMAGE="scopecache-ext-builder:latest"
+GEN_IMAGE="frankenphp-ext-builder:latest"
 
 mkdir -p "$DIST_DIR"
 
@@ -43,7 +44,7 @@ fi
 echo ">>> [pre] building (or reusing cached) $GEN_IMAGE"
 # cd + "." as context: avoids Git-Bash on Windows rewriting an absolute
 # /e/... path that the Windows docker daemon can't resolve.
-( cd "$SCRIPT_DIR" && MSYS_NO_PATHCONV=1 docker build \
+( cd "$BUILDER_DIR" && MSYS_NO_PATHCONV=1 docker build \
     "${DOCKER_BUILD_ARGS[@]}" \
     -t "$GEN_IMAGE" \
     -f Dockerfile.gen \
@@ -142,4 +143,4 @@ echo
 echo "Binary: $DIST_DIR/frankenphp"
 echo
 echo "Validate: $SCRIPT_DIR/smoke.sh"
-echo "Bench:    $SCRIPT_DIR/bench.php (see Dockerfile.bench for the runtime)"
+echo "Bench:    $SCRIPT_DIR/bench.php (runtime: $BUILDER_DIR/Dockerfile.bench)"

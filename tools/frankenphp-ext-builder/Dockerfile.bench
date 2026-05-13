@@ -1,0 +1,13 @@
+# Dockerfile.bench — FrankenPHP runtime image used by extension
+# benchmarks that need to compare against phpredis/memcached.
+# Adds those two C-extensions to the stock dunglas/frankenphp:1.12-php8
+# runtime so a bench script can call Redis/Memcached the same way
+# real PHP apps do (production standard, not pure-PHP clients).
+#
+# An extension's bench script mounts its compiled FrankenPHP binary
+# from the host at /app/dist and runs the bench PHP under this
+# runtime.
+
+FROM dunglas/frankenphp:1.12-php8
+
+RUN install-php-extensions redis memcached
