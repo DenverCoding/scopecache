@@ -1,11 +1,17 @@
 # FrankenPHP + scopecache — standalone binary
 
-A fully-static, musl-linked Linux binary that bundles:
+A fully-static, musl-linked Linux binary that bundles **everything**
+needed to serve a PHP app that talks to scopecache without any
+external network hop:
 
 - Caddy web server (port 8080 by default)
 - FrankenPHP runtime (PHP 8 ZTS, baked in)
 - scopecache as a Caddy module (`/get`, `/append`, `/stats`, …)
-- A minimal hello-world PHP page
+- `addons/guarded` — bearer-token gated `/guarded-tail`
+- `addons/frankenphp-ext` — the **PHP extension** that exposes
+  `scopecache_*()` calls directly to PHP via cgo, bypassing the
+  HTTP round-trip
+- A demo PHP page baked into the binary's filesystem
 
 No package installs, no Docker, no system PHP, no shared libraries.
 Drop it on a Linux server, make it executable, run it.
@@ -51,11 +57,21 @@ Every refresh:
 1. Picks a random noun.
 2. Calls `scopecache_append('demo', '', json_encode(['word'=>..., 'ts'=>...]))`
    — **direct cgo into the in-process `*Gateway`**, no HTTP.
-3. Calls `scopecache_tail('demo', 10)` and renders the last 10 items
+3. Calls `scopecache_tail('demo', 5)` and renders the last 5 items
    in a table.
+4. Displays a "Timings (this request)" panel: how many microseconds
+   each cgo call took plus the whole-page render time, measured via
+   `hrtime(true)` and substituted into the buffered HTML before
+   flush. Typical warm-binary numbers: append ~25-30 µs, tail ~10-15 µs.
 
 So the seq counter grows each refresh, the table fills with new
-words, the timestamps show real wall-clock spacing.
+words, the timestamps show real wall-clock spacing, and the timings
+panel makes the cgo cost concrete instead of abstract.
+
+Browser auto-fetches like `/favicon.ico` and `/robots.txt` are
+short-circuited at the Caddy layer (`respond 204`) so they do NOT
+fall through to `index.php` — without this, every page-load would
+trigger two appends (one for `/`, one for the favicon fetch).
 
 The page links to a few cache endpoints you can also hit directly:
 
@@ -156,8 +172,9 @@ cd tools/frankenphp-bin
 
 | | `frankenphp-static-linux-x86_64` | `cmd/scopecache` |
 |---|---|---|
-| What it is | Caddy + FrankenPHP + scopecache in one binary | Just scopecache, no Caddy, no PHP |
+| What it is | Caddy + FrankenPHP + scopecache + addons in one binary | Just scopecache, no Caddy, no PHP |
 | Transport | HTTP on TCP (`:8080`) | Unix socket |
 | Includes PHP runtime | Yes — also serves PHP files | No — pair with FrankenPHP or PHP-FPM separately |
-| Sub-package | `caddymodule/` (this binary uses it) | `package scopecache` directly |
+| PHP can call `scopecache_*()` via cgo | Yes (addons/frankenphp-ext baked in) | n/a — no PHP runtime |
+| Sub-packages | `caddymodule/` + `addons/guarded` + `addons/frankenphp-ext` | `package scopecache` directly |
 | Use case | Single-binary VPS deployment | Run behind nginx/apache, or talk to it over the socket |
