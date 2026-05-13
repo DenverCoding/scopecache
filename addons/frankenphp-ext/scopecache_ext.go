@@ -35,14 +35,22 @@
 //     atomic Load (~1-2 ns) instead of going through the registry's
 //     RLock + map lookup (~30-40 ns). Caddy reload swaps the slot
 //     contents atomically — no invalidation logic needed here.
-//   - Scope/id strings cross C→Go as zero-copy unsafe.String views into
-//     the zend_string's emalloc'd byte storage. Safe because
-//     scopecache.GetByID consumes them synchronously and retains no
-//     references (see store.get and buffer_read.getByID). If that
-//     contract ever changes, switch back to frankenphp.GoString.
+//   - For READ-ONLY paths (scopecache_get, scopecache_tail), scope/id
+//     cross C→Go as zero-copy unsafe.String views into the zend_string
+//     bytes (zendStringView). Safe because the Gateway consumes them
+//     synchronously and retains no references — see store.get and
+//     buffer_read.getByID.
+//   - For WRITE paths (scopecache_append), scope/id MUST be copied
+//     (zendStringCopy) because they become permanent map keys inside
+//     scopecache. The zero-copy alias would point to PHP-arena memory
+//     that PHP frees at request end, leaving the map indexed by
+//     garbage.
 //   - The returned payload skips the []byte→string→zend_string detour
 //     that frankenphp.PHPString takes, directly emalloc'ing a fresh
 //     zend_string in the PHP request arena via phpStringFromBytes.
+//   - Input payloads on the write path use zendStringBytes (alias);
+//     safe because Gateway.Append's cloneItemPayload copies them
+//     synchronously at the boundary.
 
 package scopecache_ext
 
@@ -90,6 +98,24 @@ func zendStringBytes(s *C.zend_string) []byte {
 		return nil
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&s.val)), int(s.len))
+}
+
+// zendStringCopy returns a Go string with a fresh copy of the
+// zend_string bytes. Safe for permanent retention — use this when
+// the resulting string will outlive the calling PHP_FUNCTION (e.g.
+// becomes a map key in scopecache's internal structures).
+//
+// scopecache_append needs this for both scope and id because those
+// strings become permanent map keys: s.shards[X].scopes[scope] and
+// b.byID[id]. zendStringView aliases would point to PHP-arena
+// memory that PHP frees once the request ends, leaving the map
+// indexed by garbage. scopecache_get / scopecache_tail can use
+// zendStringView because they only LOOK UP, never STORE.
+func zendStringCopy(s *C.zend_string) string {
+	if s == nil {
+		return ""
+	}
+	return C.GoStringN((*C.char)(unsafe.Pointer(&s.val)), C.int(s.len))
 }
 
 // phpStringFromBytes emalloc's a fresh zend_string in the PHP request
@@ -218,9 +244,15 @@ func scopecache_append(scope *C.zend_string, id *C.zend_string, payload *C.zend_
 	if gw == nil {
 		return 0
 	}
+	// Scope and id MUST be copied — they become permanent map keys
+	// inside scopecache (b.byID[id], s.shards[X].scopes[scope]). A
+	// zero-copy unsafe.String alias would point to PHP-arena memory
+	// that PHP frees at request end, leaving the map indexed by
+	// garbage. Payload is fine to alias here because Gateway.Append's
+	// cloneItemPayload copies it synchronously.
 	item := scopecache.Item{
-		Scope:   zendStringView(scope),
-		ID:      zendStringView(id),
+		Scope:   zendStringCopy(scope),
+		ID:      zendStringCopy(id),
 		Payload: zendStringBytes(payload),
 	}
 	result, err := gw.Append(item)
