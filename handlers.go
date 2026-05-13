@@ -26,7 +26,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"time"
 )
 
 // writeStoreCapacityError dispatches the three capacity-class
@@ -42,22 +41,22 @@ import (
 //
 // scopeForSFE is used only on the *ScopeFullError path (one-element
 // offenders list). Pass "" for callers that cannot produce one.
-func writeStoreCapacityError(w http.ResponseWriter, started time.Time, err error, scopeForSFE string) bool {
+func writeStoreCapacityError(w http.ResponseWriter, err error, scopeForSFE string) bool {
 	var sfe *ScopeFullError
 	if errors.As(err, &sfe) {
-		scopeFull(w, started, []ScopeCapacityOffender{
+		scopeFull(w, []ScopeCapacityOffender{
 			{Scope: scopeForSFE, Count: sfe.Count, Cap: sfe.Cap},
 		})
 		return true
 	}
 	var sce *ScopeCapacityError
 	if errors.As(err, &sce) {
-		scopeFull(w, started, sce.Offenders)
+		scopeFull(w, sce.Offenders)
 		return true
 	}
 	var stfe *StoreFullError
 	if errors.As(err, &stfe) {
-		storeFull(w, started, stfe)
+		storeFull(w, stfe)
 		return true
 	}
 	return false
@@ -76,15 +75,15 @@ func writeStoreCapacityError(w http.ResponseWriter, started time.Time, err error
 //
 // Caller invariant: err is non-nil. The helper writes exactly one
 // response; caller must `return` immediately afterward.
-func writeMutationError(w http.ResponseWriter, started time.Time, err error, scopeForSFE string) {
+func writeMutationError(w http.ResponseWriter, err error, scopeForSFE string) {
 	if errors.Is(err, ErrInvalidInput) {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
-	if writeStoreCapacityError(w, started, err, scopeForSFE) {
+	if writeStoreCapacityError(w, err, scopeForSFE) {
 		return
 	}
-	conflict(w, started, err.Error())
+	conflict(w, err.Error())
 }
 
 // decodeBody caps the request body at max bytes and decodes JSON into out.
@@ -142,19 +141,17 @@ func writeJSONResponse(w http.ResponseWriter, code int, resp any) {
 	_, _ = w.Write(body)
 }
 
-func badRequest(w http.ResponseWriter, started time.Time, message string) {
+func badRequest(w http.ResponseWriter, message string) {
 	writeJSONResponse(w, http.StatusBadRequest, ErrorResponse{
-		OK:         false,
-		Error:      message,
-		DurationUs: time.Since(started).Microseconds(),
+		OK:    false,
+		Error: message,
 	})
 }
 
-func conflict(w http.ResponseWriter, started time.Time, message string) {
+func conflict(w http.ResponseWriter, message string) {
 	writeJSONResponse(w, http.StatusConflict, ErrorResponse{
-		OK:         false,
-		Error:      message,
-		DurationUs: time.Since(started).Microseconds(),
+		OK:    false,
+		Error: message,
 	})
 }
 
@@ -162,16 +159,15 @@ func conflict(w http.ResponseWriter, started time.Time, message string) {
 // Used when an /append, /warm, or /rebuild would push one or more scopes past
 // the per-scope capacity. The client is expected to drain (e.g. /delete_up_to
 // or /delete_scope) or chunk the batch and retry.
-func scopeFull(w http.ResponseWriter, started time.Time, offenders []ScopeCapacityOffender) {
+func scopeFull(w http.ResponseWriter, offenders []ScopeCapacityOffender) {
 	msg := "scope is at capacity"
 	if len(offenders) > 1 {
 		msg = "multiple scopes are at capacity"
 	}
 	writeJSONResponse(w, http.StatusInsufficientStorage, ScopeCapacityErrorResponse{
-		OK:         false,
-		Error:      msg,
-		Scopes:     offenders,
-		DurationUs: time.Since(started).Microseconds(),
+		OK:     false,
+		Error:  msg,
+		Scopes: offenders,
 	})
 }
 
@@ -179,34 +175,30 @@ func scopeFull(w http.ResponseWriter, started time.Time, offenders []ScopeCapaci
 // The body carries the store-level totals (all in MiB, matching /stats) so a
 // client can judge how much headroom remains and whether draining one scope
 // will fix the next retry.
-func storeFull(w http.ResponseWriter, started time.Time, e *StoreFullError) {
+func storeFull(w http.ResponseWriter, e *StoreFullError) {
 	writeJSONResponse(w, http.StatusInsufficientStorage, StoreCapacityErrorResponse{
 		OK:            false,
 		Error:         "store is at byte capacity",
 		ApproxStoreMB: MB(e.StoreBytes),
 		AddedMB:       MB(e.AddedBytes),
 		MaxStoreMB:    MB(e.Cap),
-		DurationUs:    time.Since(started).Microseconds(),
 	})
 }
 
 // responseTooLarge writes the 507 envelope used by the cap-protected
 // read endpoints (/head, /tail, /scopelist) when the marshalled
-// body would exceed the per-response cap. Body shape mirrors the
-// other 507 helpers (storeFull, scopeFull): {ok, error,
-// approx_response_mb, max_response_mb, duration_us}.
+// body would exceed the per-response cap.
 //
 // Side effects already applied by the handler are not rolled back.
 // This matches every other 507 in the cache: 2xx is not durability,
 // and 507 does not roll back. In practice the cap-protected
 // endpoints are read-only, so there is nothing to roll back.
-func responseTooLarge(w http.ResponseWriter, started time.Time, written, cap int64) {
+func responseTooLarge(w http.ResponseWriter, written, cap int64) {
 	writeJSONResponse(w, http.StatusInsufficientStorage, ResponseTooLargeErrorResponse{
 		OK:               false,
 		Error:            "the response would exceed the maximum allowed size",
 		ApproxResponseMB: MB(written),
 		MaxResponseMB:    MB(cap),
-		DurationUs:       time.Since(started).Microseconds(),
 	})
 }
 
@@ -215,12 +207,11 @@ func responseTooLarge(w http.ResponseWriter, started time.Time, written, cap int
 // server MUST generate an Allow header field in a 405 response").
 // `allowed` is typically a single method (POST or GET); pass a
 // comma-separated list if a future endpoint accepts multiple.
-func methodNotAllowed(w http.ResponseWriter, started time.Time, allowed string) {
+func methodNotAllowed(w http.ResponseWriter, allowed string) {
 	w.Header().Set("Allow", allowed)
 	writeJSONResponse(w, http.StatusMethodNotAllowed, ErrorResponse{
-		OK:         false,
-		Error:      "the HTTP method is not allowed for this endpoint",
-		DurationUs: time.Since(started).Microseconds(),
+		OK:    false,
+		Error: "the HTTP method is not allowed for this endpoint",
 	})
 }
 

@@ -5,13 +5,13 @@
 //   - /get       — single-item lookup by id or seq, JSON envelope
 //   - /render    — single-item raw payload, no JSON envelope
 //
-// /head and /tail share writeItemsHit / writeItemsMiss so the wire
-// shape (`ok`, `hit`, `count`, `truncated`, `items`,
-// `approx_response_mb`, `duration_us`) stays uniform across the
-// list-returning read family. writeItemsHit enforces the
-// per-response cap before marshal-and-write; the read-heat stamp
-// (only on non-empty results) lives one layer down in Store.head /
-// Store.tail.
+// /head and /tail share writeHeadResponse / writeTailResponse, which
+// both route to writeItemsResponse so the wire shape (`ok`, `hit`,
+// `count`, [`offset` for /tail], `truncated`, `items`,
+// `approx_response_mb`) stays uniform across the list-returning read
+// family. Pre-flight cap enforcement is done in the head/tail
+// wrappers; the read-heat stamp (only on non-empty results) lives
+// one layer down in Store.head / Store.tail.
 
 package scopecache
 
@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"time"
 )
 
 // writeHeadResponse / writeTailResponse are the typed-struct entry
@@ -27,33 +26,32 @@ import (
 // writeItemsResponse builder with the right offset slot wired up
 // (/tail carries it, /head does not). Pre-flight cap check applies
 // only on the hit path where items are present.
-func (api *API) writeHeadResponse(w http.ResponseWriter, resp HeadResponse, started time.Time) {
+func (api *API) writeHeadResponse(w http.ResponseWriter, resp HeadResponse) {
 	if len(resp.Items) > 0 {
 		if estimated := estimateMultiItemResponseBytes(resp.Items); estimated > api.maxResponseBytes {
-			responseTooLarge(w, started, estimated, api.maxResponseBytes)
+			responseTooLarge(w, estimated, api.maxResponseBytes)
 			return
 		}
 	}
-	api.writeItemsResponse(w, started, resp.Items, resp.Truncated, nil)
+	api.writeItemsResponse(w, resp.Items, resp.Truncated, nil)
 }
 
-func (api *API) writeTailResponse(w http.ResponseWriter, resp TailResponse, started time.Time) {
+func (api *API) writeTailResponse(w http.ResponseWriter, resp TailResponse) {
 	if len(resp.Items) > 0 {
 		if estimated := estimateMultiItemResponseBytes(resp.Items); estimated > api.maxResponseBytes {
-			responseTooLarge(w, started, estimated, api.maxResponseBytes)
+			responseTooLarge(w, estimated, api.maxResponseBytes)
 			return
 		}
 	}
-	api.writeItemsResponse(w, started, resp.Items, resp.Truncated, &resp.Offset)
+	api.writeItemsResponse(w, resp.Items, resp.Truncated, &resp.Offset)
 }
 
-// writeItemsResponse builds the /head / /tail / /scopelist (when
-// reused) envelope manually in a single buffer and writes it once.
-// The path that this replaces (writeJSONWithMetaCap → marshalWith-
-// ApproxSize) ran json.Marshal over the items array (one full
-// payload-bytes copy) and then spliced duration_us+approx_response_mb
-// into a fresh buffer (a second full copy). For 1000-item × 10 KiB
-// /tail responses that meant ~64 MiB of allocation per request.
+// writeItemsResponse builds the /head / /tail envelope manually in a
+// single buffer and writes it once. The earlier json.Marshal+splice
+// path copied the entire items array twice — once during marshal,
+// once when splicing in the size-suffix — which dominated /tail's
+// per-call cost at large payloads. The manual single-buffer path
+// halves that allocation volume.
 //
 // The new path: one buffer, pre-grown from estimateMultiItemResponse-
 // Bytes plus a small per-item JSON-skeleton headroom; per-item JSON
@@ -72,7 +70,6 @@ func (api *API) writeTailResponse(w http.ResponseWriter, resp TailResponse, star
 //     discard the built body.
 func (api *API) writeItemsResponse(
 	w http.ResponseWriter,
-	started time.Time,
 	items []Item,
 	truncated bool,
 	offset *int,
@@ -119,9 +116,10 @@ func (api *API) writeItemsResponse(
 	}
 	buf = append(buf, ']')
 
-	// Suffix: duration_us + approx_response_mb (single-pass estimate).
-	buf = append(buf, `,"duration_us":`...)
-	buf = strconv.AppendInt(buf, time.Since(started).Microseconds(), 10)
+	// Suffix: approx_response_mb (single-pass estimate). Computed
+	// from the current buf length + the suffix bytes we are about
+	// to append; tracks the actual marshalled size within MB-precision
+	// rounding.
 	estTotal := len(buf) + 30
 	mbVal := float64(estTotal) / 1048576.0
 	buf = append(buf, `,"approx_response_mb":`...)
@@ -130,7 +128,7 @@ func (api *API) writeItemsResponse(
 
 	// Authoritative cap on the actual marshalled body.
 	if int64(len(buf)) > api.maxResponseBytes {
-		responseTooLarge(w, started, int64(len(buf)), api.maxResponseBytes)
+		responseTooLarge(w, int64(len(buf)), api.maxResponseBytes)
 		return
 	}
 
@@ -192,16 +190,14 @@ func appendItemJSON(buf []byte, item Item) []byte {
 }
 
 func (api *API) handleHead(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started, http.MethodGet)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
 	q, err := parseScopeLimit(r, "/head")
 	if err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 	query := r.URL.Query()
@@ -209,7 +205,7 @@ func (api *API) handleHead(w http.ResponseWriter, r *http.Request) {
 	// lives on /tail exclusively because seq-based forward reads are stable
 	// under /delete_up_to while position-based forward reads are not.
 	if query.Has("offset") {
-		badRequest(w, started, "the 'offset' parameter is not supported on /head; use 'after_seq' instead, or call /tail for position-based paging")
+		badRequest(w, "the 'offset' parameter is not supported on /head; use 'after_seq' instead, or call /tail for position-based paging")
 		return
 	}
 
@@ -220,14 +216,14 @@ func (api *API) handleHead(w http.ResponseWriter, r *http.Request) {
 	if raw := query.Get("after_seq"); raw != "" {
 		afterSeq, err = strconv.ParseUint(raw, 10, 64)
 		if err != nil {
-			badRequest(w, started, "the 'after_seq' parameter must be a valid unsigned integer")
+			badRequest(w, "the 'after_seq' parameter must be a valid unsigned integer")
 			return
 		}
 	}
 
 	items, truncated, found := api.store.head(q.Scope, afterSeq, q.Limit)
 	if !found {
-		api.writeHeadResponse(w, HeadResponse{OK: true, Hit: false, Count: 0, Truncated: false, Items: nil}, started)
+		api.writeHeadResponse(w, HeadResponse{OK: true, Hit: false, Count: 0, Truncated: false, Items: nil})
 		return
 	}
 	api.writeHeadResponse(w, HeadResponse{
@@ -236,31 +232,29 @@ func (api *API) handleHead(w http.ResponseWriter, r *http.Request) {
 		Count:     len(items),
 		Truncated: truncated,
 		Items:     items,
-	}, started)
+	})
 }
 
 func (api *API) handleTail(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started, http.MethodGet)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
 	q, err := parseScopeLimit(r, "/tail")
 	if err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 	offset, err := normalizeOffset(r.URL.Query().Get("offset"))
 	if err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
 	items, truncated, found := api.store.tail(q.Scope, q.Limit, offset)
 	if !found {
-		api.writeTailResponse(w, TailResponse{OK: true, Hit: false, Count: 0, Offset: offset, Truncated: false, Items: nil}, started)
+		api.writeTailResponse(w, TailResponse{OK: true, Hit: false, Count: 0, Offset: offset, Truncated: false, Items: nil})
 		return
 	}
 	api.writeTailResponse(w, TailResponse{
@@ -270,20 +264,18 @@ func (api *API) handleTail(w http.ResponseWriter, r *http.Request) {
 		Offset:    offset,
 		Truncated: truncated,
 		Items:     items,
-	}, started)
+	})
 }
 
 func (api *API) handleGet(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started, http.MethodGet)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
 	target, err := parseLookupTarget(r, "/get")
 	if err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
@@ -298,10 +290,10 @@ func (api *API) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !found {
-		writeGetResponse(w, GetResponse{OK: true, Hit: false, Count: 0, Item: nil}, started)
+		writeGetResponse(w, GetResponse{OK: true, Hit: false, Count: 0, Item: nil})
 		return
 	}
-	writeGetResponse(w, GetResponse{OK: true, Hit: true, Count: 1, Item: &item}, started)
+	writeGetResponse(w, GetResponse{OK: true, Hit: true, Count: 1, Item: &item})
 }
 
 // writeGetResponse assembles the /get JSON envelope manually and
@@ -330,7 +322,7 @@ func (api *API) handleGet(w http.ResponseWriter, r *http.Request) {
 // bytes — well under the 4-decimal MiB precision (~104 bytes per
 // 0.0001) — and the user has signed off on that tolerance for the
 // throughput win.
-func writeGetResponse(w http.ResponseWriter, resp GetResponse, started time.Time) {
+func writeGetResponse(w http.ResponseWriter, resp GetResponse) {
 	// payload is hoisted to function scope so the post-prefix size
 	// estimate and the final write-payload-bytes step can both see it.
 	// Nil on miss; len(nil) == 0 keeps the estTotal math correct.
@@ -384,8 +376,6 @@ func writeGetResponse(w http.ResponseWriter, resp GetResponse, started time.Time
 	if resp.Hit {
 		suffix = append(suffix, '}') // close item
 	}
-	suffix = append(suffix, `,"duration_us":`...)
-	suffix = strconv.AppendInt(suffix, time.Since(started).Microseconds(), 10)
 
 	// Single-pass approx_response_mb estimate. Tracks the actual
 	// body size to within the width of the MB value itself (~8
@@ -456,16 +446,14 @@ func appendJSONString(dst []byte, s string) []byte {
 //     as `<html>...` on the wire. All other JSON values (object, array, number,
 //     bool) are written raw; the consumer is expected to parse them as JSON.
 func (api *API) handleRender(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started, http.MethodGet)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
 	target, err := parseLookupTarget(r, "/render")
 	if err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 

@@ -15,20 +15,17 @@ package scopecache
 
 import (
 	"net/http"
-	"time"
 )
 
 func (api *API) handleWarm(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	var req itemsRequest
 	if err := decodeBody(w, r, api.maxBulkBytes, &req); err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
@@ -37,7 +34,7 @@ func (api *API) handleWarm(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// /warm produces only *ScopeCapacityError or *StoreFullError;
 		// no *ScopeFullError, so scopeForSFE is unused.
-		writeMutationError(w, started, err, "")
+		writeMutationError(w, err, "")
 		return
 	}
 
@@ -45,21 +42,18 @@ func (api *API) handleWarm(w http.ResponseWriter, r *http.Request) {
 		OK:             true,
 		Count:          len(req.Items),
 		ReplacedScopes: replacedScopes,
-		DurationUs:     time.Since(started).Microseconds(),
 	})
 }
 
 func (api *API) handleRebuild(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	var req itemsRequest
 	if err := decodeBody(w, r, api.maxBulkBytes, &req); err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
@@ -72,7 +66,7 @@ func (api *API) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	// of Gateway.Rebuild who want a wipe-shaped rebuild can pass an
 	// empty map intentionally.
 	if len(req.Items) == 0 {
-		badRequest(w, started, "the 'items' array must not be empty for the '/rebuild' endpoint")
+		badRequest(w, "the 'items' array must not be empty for the '/rebuild' endpoint")
 		return
 	}
 
@@ -81,7 +75,7 @@ func (api *API) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// /rebuild produces only *ScopeCapacityError or *StoreFullError;
 		// no *ScopeFullError, so scopeForSFE is unused.
-		writeMutationError(w, started, err, "")
+		writeMutationError(w, err, "")
 		return
 	}
 
@@ -90,6 +84,5 @@ func (api *API) handleRebuild(w http.ResponseWriter, r *http.Request) {
 		Count:         len(req.Items),
 		RebuiltScopes: rebuiltScopes,
 		RebuiltItems:  rebuiltItems,
-		DurationUs:    time.Since(started).Microseconds(),
 	})
 }

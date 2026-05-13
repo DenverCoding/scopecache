@@ -530,7 +530,7 @@ func approxItemSize(item Item) int64 {
 // correctness gate.
 const (
 	// multiItemEnvelopeMinBytes is the minimum byte cost of the outer
-	// JSON envelope ({ok, hit, count, truncated, items, duration_us,
+	// JSON envelope ({ok, hit, count, truncated, items,
 	// approx_response_mb}). 80 bytes is below the smallest possible
 	// envelope encoding for either handler, even when count
 	// is single-digit and the float fields are at minimum width.

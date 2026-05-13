@@ -19,7 +19,6 @@ package scopecache
 import (
 	"errors"
 	"net/http"
-	"time"
 )
 
 // writeAck is the response shape /append and /upsert nest under
@@ -36,30 +35,27 @@ type writeAck struct {
 }
 
 func (api *API) handleAppend(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	var item Item
 	if err := decodeBody(w, r, api.maxSingleBytes, &item); err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
 	origScope := item.Scope
 	item, err := api.store.appendOne(item)
 	if err != nil {
-		writeMutationError(w, started, err, origScope)
+		writeMutationError(w, err, origScope)
 		return
 	}
 
 	writeJSONResponse(w, http.StatusOK, AppendResponse{
-		OK:         true,
-		Item:       writeAck{Scope: item.Scope, ID: item.ID, Seq: item.Seq, Ts: item.Ts},
-		DurationUs: time.Since(started).Microseconds(),
+		OK:   true,
+		Item: writeAck{Scope: item.Scope, ID: item.ID, Seq: item.Seq, Ts: item.Ts},
 	})
 }
 
@@ -68,23 +64,21 @@ func (api *API) handleAppend(w http.ResponseWriter, r *http.Request) {
 // on absent items), /upsert always writes — making it the idempotent, retry-
 // safe write path. Seq is preserved on replace and freshly assigned on create.
 func (api *API) handleUpsert(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	var item Item
 	if err := decodeBody(w, r, api.maxSingleBytes, &item); err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
 	origScope := item.Scope
 	result, created, err := api.store.upsertOne(item)
 	if err != nil {
-		writeMutationError(w, started, err, origScope)
+		writeMutationError(w, err, origScope)
 		return
 	}
 
@@ -92,10 +86,9 @@ func (api *API) handleUpsert(w http.ResponseWriter, r *http.Request) {
 	// is the pre-existing seq on a replace and the freshly-assigned seq
 	// on a create.
 	writeJSONResponse(w, http.StatusOK, UpsertResponse{
-		OK:         true,
-		Created:    created,
-		Item:       writeAck{Scope: result.Scope, ID: result.ID, Seq: result.Seq, Ts: result.Ts},
-		DurationUs: time.Since(started).Microseconds(),
+		OK:      true,
+		Created: created,
+		Item:    writeAck{Scope: result.Scope, ID: result.ID, Seq: result.Seq, Ts: result.Ts},
 	})
 }
 
@@ -104,16 +97,14 @@ func (api *API) handleUpsert(w http.ResponseWriter, r *http.Request) {
 // mutates a payload as a typed value — every other write path
 // treats payloads as opaque bytes.
 func (api *API) handleCounterAdd(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	var req counterAddRequest
 	if err := decodeBody(w, r, api.maxSingleBytes, &req); err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
@@ -124,7 +115,7 @@ func (api *API) handleCounterAdd(w http.ResponseWriter, r *http.Request) {
 	// the nil-check stays here. Range + non-zero validation lives in
 	// Store.counterAddOne (it sees int64).
 	if req.By == nil {
-		badRequest(w, started, "the 'by' field is required for the '/counter_add' endpoint")
+		badRequest(w, "the 'by' field is required for the '/counter_add' endpoint")
 		return
 	}
 
@@ -132,49 +123,46 @@ func (api *API) handleCounterAdd(w http.ResponseWriter, r *http.Request) {
 	value, created, err := api.store.counterAddOne(req.Scope, req.ID, *req.By)
 	if err != nil {
 		if errors.Is(err, ErrInvalidInput) {
-			badRequest(w, started, err.Error())
+			badRequest(w, err.Error())
 			return
 		}
 		// Capacity-class errors (*ScopeFullError + *StoreFullError).
 		// Counter-specific errors are handled inline below — they do
 		// not fit writeStoreCapacityError because *CounterPayloadError
 		// maps to 409 conflict and *CounterOverflowError maps to 400.
-		if writeStoreCapacityError(w, started, err, origScope) {
+		if writeStoreCapacityError(w, err, origScope) {
 			return
 		}
 		var payloadErr *CounterPayloadError
 		if errors.As(err, &payloadErr) {
-			conflict(w, started, payloadErr.Error())
+			conflict(w, payloadErr.Error())
 			return
 		}
 		var overflowErr *CounterOverflowError
 		if errors.As(err, &overflowErr) {
-			badRequest(w, started, overflowErr.Error())
+			badRequest(w, overflowErr.Error())
 			return
 		}
-		conflict(w, started, err.Error())
+		conflict(w, err.Error())
 		return
 	}
 
 	writeJSONResponse(w, http.StatusOK, CounterAddResponse{
-		OK:         true,
-		Created:    created,
-		Value:      value,
-		DurationUs: time.Since(started).Microseconds(),
+		OK:      true,
+		Created: created,
+		Value:   value,
 	})
 }
 
 func (api *API) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	var item Item
 	if err := decodeBody(w, r, api.maxSingleBytes, &item); err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
@@ -183,7 +171,7 @@ func (api *API) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		// /update only ever sees *StoreFullError on the cap path
 		// (existing-item replace can grow byte size); scopeForSFE is
 		// unused.
-		writeMutationError(w, started, err, "")
+		writeMutationError(w, err, "")
 		return
 	}
 
@@ -191,6 +179,5 @@ func (api *API) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		OK:           true,
 		Hit:          updated > 0,
 		UpdatedCount: updated,
-		DurationUs:   time.Since(started).Microseconds(),
 	})
 }

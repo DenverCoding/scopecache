@@ -25,14 +25,11 @@ package scopecache
 import (
 	"net/http"
 	"strconv"
-	"time"
 )
 
 func (api *API) handleStats(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started, http.MethodGet)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -54,7 +51,6 @@ func (api *API) handleStats(w http.ResponseWriter, r *http.Request) {
 		LastWriteTS:      st.LastWriteTS,
 		EventsDropsTotal: st.EventsDropsTotal,
 		ReservedScopes:   st.ReservedScopes,
-		DurationUs:       time.Since(started).Microseconds(),
 	})
 }
 
@@ -80,10 +76,8 @@ func (api *API) handleStats(w http.ResponseWriter, r *http.Request) {
 // eviction-candidate signals that addons compute from
 // read_count_total deltas.
 func (api *API) handleScopeList(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodGet {
-		methodNotAllowed(w, started, http.MethodGet)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -96,20 +90,20 @@ func (api *API) handleScopeList(w http.ResponseWriter, r *http.Request) {
 	// legitimate (no filter, start from beginning) and skip validation.
 	if prefix != "" {
 		if err := checkKeyField("prefix", prefix, MaxScopeBytes); err != nil {
-			badRequest(w, started, err.Error())
+			badRequest(w, err.Error())
 			return
 		}
 	}
 	if after != "" {
 		if err := checkKeyField("after", after, MaxScopeBytes); err != nil {
-			badRequest(w, started, err.Error())
+			badRequest(w, err.Error())
 			return
 		}
 	}
 
 	limit, err := normalizeLimit(query.Get("limit"))
 	if err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
@@ -120,7 +114,7 @@ func (api *API) handleScopeList(w http.ResponseWriter, r *http.Request) {
 		Count:     len(entries),
 		Truncated: truncated,
 		Scopes:    entries,
-	}, started)
+	})
 }
 
 // writeScopeListResponse mirrors writeItemsResponse for /scopelist:
@@ -134,7 +128,7 @@ func (api *API) handleScopeList(w http.ResponseWriter, r *http.Request) {
 // previous orderedFields path produced; `hit` is `count > 0`, the
 // same semantic /head and /tail derive from `len(items) > 0`, so
 // the list-return read family stays uniform on the wire.
-func (api *API) writeScopeListResponse(w http.ResponseWriter, resp ScopeListResponse, started time.Time) {
+func (api *API) writeScopeListResponse(w http.ResponseWriter, resp ScopeListResponse) {
 	estCapacity := int64(192) + int64(len(resp.Scopes))*150
 	for i := range resp.Scopes {
 		estCapacity += int64(len(resp.Scopes[i].Scope))
@@ -164,8 +158,6 @@ func (api *API) writeScopeListResponse(w http.ResponseWriter, resp ScopeListResp
 	}
 	buf = append(buf, ']')
 
-	buf = append(buf, `,"duration_us":`...)
-	buf = strconv.AppendInt(buf, time.Since(started).Microseconds(), 10)
 	estTotal := len(buf) + 30
 	mbVal := float64(estTotal) / 1048576.0
 	buf = append(buf, `,"approx_response_mb":`...)
@@ -173,7 +165,7 @@ func (api *API) writeScopeListResponse(w http.ResponseWriter, resp ScopeListResp
 	buf = append(buf, '}', '\n')
 
 	if int64(len(buf)) > api.maxResponseBytes {
-		responseTooLarge(w, started, int64(len(buf)), api.maxResponseBytes)
+		responseTooLarge(w, int64(len(buf)), api.maxResponseBytes)
 		return
 	}
 

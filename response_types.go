@@ -1,26 +1,17 @@
 // response_types.go — typed envelope structs for every endpoint's
-// success response, plus the four error-response shapes.
+// success response, plus the three error-response shapes.
 //
 // Single source of truth for the HTTP wire format. Each handler builds
-// its response struct, passes it to writeResponse, and the dispatcher
-// picks the right serialisation:
+// its response struct and passes it to writeJSONResponse, which calls
+// json.Marshal. The struct's declared field order is preserved by
+// encoding/json, so wire output matches the historical inline-build
+// path on every field except the now-removed duration_us suffix
+// (deliberately dropped in Phase C — see commit log).
 //
-//   - Read-side endpoints with cap-protected response bodies
-//     (/get, /tail, /head, /scopelist) route to their existing manual
-//     byte-builders; the builders now consume the struct directly.
-//   - Everything else goes through json.Marshal(resp) + write.
-//
-// Field declaration order matches the historical inline-orderedFields
-// emission order on each endpoint, so json.Marshal produces byte-
-// identical output to the pre-refactor writeJSONWithDuration path —
-// the wire format is unchanged.
-//
-// approx_response_mb is intentionally NOT a struct field. It depends
-// on the final serialised body length, which is only known inside
-// the fast-path byte-builder. The builder appends it after
-// duration_us in the same place the historical code did. Read-side
-// structs therefore describe the "data" half of the envelope; the
-// fast-path adds the "size" half.
+// Cap-protected reads (/get, /tail, /head, /scopelist) keep their
+// dedicated byte-builders for payload-copy avoidance; those builders
+// consume the typed struct directly and emit approx_response_mb
+// (computed from final buffer length, not stored in the struct).
 
 package scopecache
 
@@ -28,39 +19,35 @@ package scopecache
 
 // AppendResponse is the body of a successful POST /append.
 type AppendResponse struct {
-	OK         bool     `json:"ok"`
-	Item       writeAck `json:"item"`
-	DurationUs int64    `json:"duration_us"`
+	OK   bool     `json:"ok"`
+	Item writeAck `json:"item"`
 }
 
 // UpsertResponse is the body of a successful POST /upsert. `created`
 // is true on first-write of the (scope,id) and false on payload
 // replace.
 type UpsertResponse struct {
-	OK         bool     `json:"ok"`
-	Created    bool     `json:"created"`
-	Item       writeAck `json:"item"`
-	DurationUs int64    `json:"duration_us"`
+	OK      bool     `json:"ok"`
+	Created bool     `json:"created"`
+	Item    writeAck `json:"item"`
 }
 
 // UpdateResponse is the body of a successful POST /update. `hit` =
 // `updated_count > 0`; both fields are kept for backward-compat with
 // clients that branch on one or the other.
 type UpdateResponse struct {
-	OK           bool  `json:"ok"`
-	Hit          bool  `json:"hit"`
-	UpdatedCount int   `json:"updated_count"`
-	DurationUs   int64 `json:"duration_us"`
+	OK           bool `json:"ok"`
+	Hit          bool `json:"hit"`
+	UpdatedCount int  `json:"updated_count"`
 }
 
 // CounterAddResponse is the body of a successful POST /counter_add.
 // `created` distinguishes first-touch (counter spawned) from in-place
 // increment.
 type CounterAddResponse struct {
-	OK         bool  `json:"ok"`
-	Created    bool  `json:"created"`
-	Value      int64 `json:"value"`
-	DurationUs int64 `json:"duration_us"`
+	OK      bool  `json:"ok"`
+	Created bool  `json:"created"`
+	Value   int64 `json:"value"`
 }
 
 // --- Success: deletes -----------------------------------------------
@@ -68,10 +55,9 @@ type CounterAddResponse struct {
 // DeleteResponse is the body of a successful POST /delete and
 // /delete_up_to — both share the same wire shape.
 type DeleteResponse struct {
-	OK           bool  `json:"ok"`
-	Hit          bool  `json:"hit"`
-	DeletedCount int   `json:"deleted_count"`
-	DurationUs   int64 `json:"duration_us"`
+	OK           bool `json:"ok"`
+	Hit          bool `json:"hit"`
+	DeletedCount int  `json:"deleted_count"`
 }
 
 // DeleteScopeResponse is the body of a successful POST /delete_scope.
@@ -81,19 +67,17 @@ type DeleteResponse struct {
 // deleted". On /delete_scope an existing-but-already-empty scope
 // still counts as a hit (the scope is gone after the call).
 type DeleteScopeResponse struct {
-	OK           bool  `json:"ok"`
-	Hit          bool  `json:"hit"`
-	DeletedItems int   `json:"deleted_items"`
-	DurationUs   int64 `json:"duration_us"`
+	OK           bool `json:"ok"`
+	Hit          bool `json:"hit"`
+	DeletedItems int  `json:"deleted_items"`
 }
 
 // WipeResponse is the body of a successful POST /wipe.
 type WipeResponse struct {
-	OK            bool  `json:"ok"`
-	DeletedScopes int   `json:"deleted_scopes"`
-	DeletedItems  int   `json:"deleted_items"`
-	FreedMB       MB    `json:"freed_mb"`
-	DurationUs    int64 `json:"duration_us"`
+	OK            bool `json:"ok"`
+	DeletedScopes int  `json:"deleted_scopes"`
+	DeletedItems  int  `json:"deleted_items"`
+	FreedMB       MB   `json:"freed_mb"`
 }
 
 // --- Success: bulk --------------------------------------------------
@@ -103,26 +87,23 @@ type WipeResponse struct {
 // `replaced_scopes` is the number of distinct scopes that were
 // rewritten.
 type WarmResponse struct {
-	OK             bool  `json:"ok"`
-	Count          int   `json:"count"`
-	ReplacedScopes int   `json:"replaced_scopes"`
-	DurationUs     int64 `json:"duration_us"`
+	OK             bool `json:"ok"`
+	Count          int  `json:"count"`
+	ReplacedScopes int  `json:"replaced_scopes"`
 }
 
 // RebuildResponse is the body of a successful POST /rebuild.
 type RebuildResponse struct {
-	OK            bool  `json:"ok"`
-	Count         int   `json:"count"`
-	RebuiltScopes int   `json:"rebuilt_scopes"`
-	RebuiltItems  int   `json:"rebuilt_items"`
-	DurationUs    int64 `json:"duration_us"`
+	OK            bool `json:"ok"`
+	Count         int  `json:"count"`
+	RebuiltScopes int  `json:"rebuilt_scopes"`
+	RebuiltItems  int  `json:"rebuilt_items"`
 }
 
 // --- Success: observability -----------------------------------------
 
 // StatsResponse is the body of a successful GET /stats. Fields after
-// `ok` are flattened straight from storeStats — same names as the
-// orderedFields path used pre-refactor.
+// `ok` are flattened straight from storeStats.
 type StatsResponse struct {
 	OK               bool                 `json:"ok"`
 	ScopeCount       int                  `json:"scope_count"`
@@ -131,22 +112,21 @@ type StatsResponse struct {
 	LastWriteTS      int64                `json:"last_write_ts"`
 	EventsDropsTotal int64                `json:"events_drops_total"`
 	ReservedScopes   []reservedScopeEntry `json:"reserved_scopes"`
-	DurationUs       int64                `json:"duration_us"`
 }
 
 // --- Success: cap-protected reads ----------------------------------
 //
 // Fast-path read responses (Get/Tail/Head/ScopeList) describe ONLY
-// the "data" half of the wire envelope. The "timing" half —
-// duration_us and approx_response_mb — is emitted by the dedicated
-// write*Response builder using a separate `started` parameter and a
-// post-build buffer-size estimate. These structs therefore do NOT
-// json.Marshal to the full wire output; their consumer is always the
-// matching builder, never the generic writeJSONResponse path.
+// the "data" half of the wire envelope. The "size" half —
+// approx_response_mb — is emitted by the dedicated write*Response
+// builder using a post-build buffer-size estimate. These structs
+// therefore do NOT json.Marshal to the full wire output; their
+// consumer is always the matching builder, never the generic
+// writeJSONResponse path.
 
 // GetResponse is the data half of a successful GET /get response.
-// The wire-final envelope adds duration_us + approx_response_mb at
-// emit time inside writeGetResponse.
+// The wire-final envelope adds approx_response_mb at emit time inside
+// writeGetResponse.
 type GetResponse struct {
 	OK    bool  `json:"ok"`
 	Hit   bool  `json:"hit"`
@@ -186,23 +166,21 @@ type ScopeListResponse struct {
 // --- Error responses ------------------------------------------------
 
 // ErrorResponse is the body of 400 / 405 / 409 / 507 responses for the
-// simple "ok:false, error, duration_us" shape. The variants that need
-// extra fields (ScopeCapacityErrorResponse, StoreCapacityErrorResponse,
+// simple "ok:false, error" shape. The variants that need extra fields
+// (ScopeCapacityErrorResponse, StoreCapacityErrorResponse,
 // ResponseTooLargeErrorResponse) are separate types so json.Marshal
 // emits the right fields in the right order.
 type ErrorResponse struct {
-	OK         bool   `json:"ok"` // always false
-	Error      string `json:"error"`
-	DurationUs int64  `json:"duration_us"`
+	OK    bool   `json:"ok"` // always false
+	Error string `json:"error"`
 }
 
 // ScopeCapacityErrorResponse is the 507 body emitted by scopeFull —
 // one or more scopes are at their per-scope item cap.
 type ScopeCapacityErrorResponse struct {
-	OK         bool                    `json:"ok"` // always false
-	Error      string                  `json:"error"`
-	Scopes     []ScopeCapacityOffender `json:"scopes"`
-	DurationUs int64                   `json:"duration_us"`
+	OK     bool                    `json:"ok"` // always false
+	Error  string                  `json:"error"`
+	Scopes []ScopeCapacityOffender `json:"scopes"`
 }
 
 // StoreCapacityErrorResponse is the 507 body emitted by storeFull —
@@ -213,7 +191,6 @@ type StoreCapacityErrorResponse struct {
 	ApproxStoreMB MB     `json:"approx_store_mb"`
 	AddedMB       MB     `json:"added_mb"`
 	MaxStoreMB    MB     `json:"max_store_mb"`
-	DurationUs    int64  `json:"duration_us"`
 }
 
 // ResponseTooLargeErrorResponse is the 507 body emitted by the
@@ -224,5 +201,4 @@ type ResponseTooLargeErrorResponse struct {
 	Error            string `json:"error"`
 	ApproxResponseMB MB     `json:"approx_response_mb"`
 	MaxResponseMB    MB     `json:"max_response_mb"`
-	DurationUs       int64  `json:"duration_us"`
 }

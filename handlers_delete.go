@@ -16,27 +16,24 @@ package scopecache
 import (
 	"errors"
 	"net/http"
-	"time"
 )
 
 func (api *API) handleDelete(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	var req deleteRequest
 	if err := decodeBody(w, r, api.maxSingleBytes, &req); err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
 	deleted, err := api.store.deleteOne(req.Scope, req.ID, req.Seq)
 	if err != nil {
 		if errors.Is(err, ErrInvalidInput) {
-			badRequest(w, started, err.Error())
+			badRequest(w, err.Error())
 			return
 		}
 		// *ScopeDetachedError: the scope was wiped/deleted/rebuilt
@@ -44,7 +41,7 @@ func (api *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 		// stance as /append, /upsert, /update, /counter_add. A retry
 		// will see the new state (possibly miss, possibly a fresh
 		// scope with no such id).
-		conflict(w, started, err.Error())
+		conflict(w, err.Error())
 		return
 	}
 
@@ -52,32 +49,29 @@ func (api *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 		OK:           true,
 		Hit:          deleted > 0,
 		DeletedCount: deleted,
-		DurationUs:   time.Since(started).Microseconds(),
 	})
 }
 
 func (api *API) handleDeleteUpTo(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	var req deleteUpToRequest
 	if err := decodeBody(w, r, api.maxSingleBytes, &req); err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
 	deleted, err := api.store.deleteUpTo(req.Scope, req.MaxSeq)
 	if err != nil {
 		if errors.Is(err, ErrInvalidInput) {
-			badRequest(w, started, err.Error())
+			badRequest(w, err.Error())
 			return
 		}
 		// Same orphan-detect rationale as handleDelete above.
-		conflict(w, started, err.Error())
+		conflict(w, err.Error())
 		return
 	}
 
@@ -85,31 +79,28 @@ func (api *API) handleDeleteUpTo(w http.ResponseWriter, r *http.Request) {
 		OK:           true,
 		Hit:          deleted > 0,
 		DeletedCount: deleted,
-		DurationUs:   time.Since(started).Microseconds(),
 	})
 }
 
 func (api *API) handleDeleteScope(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	var req deleteScopeRequest
 	if err := decodeBody(w, r, api.maxSingleBytes, &req); err != nil {
-		badRequest(w, started, err.Error())
+		badRequest(w, err.Error())
 		return
 	}
 
 	deletedItems, deleted, err := api.store.deleteScope(req.Scope)
 	if err != nil {
 		if errors.Is(err, ErrInvalidInput) {
-			badRequest(w, started, err.Error())
+			badRequest(w, err.Error())
 			return
 		}
-		conflict(w, started, err.Error())
+		conflict(w, err.Error())
 		return
 	}
 
@@ -117,7 +108,6 @@ func (api *API) handleDeleteScope(w http.ResponseWriter, r *http.Request) {
 		OK:           true,
 		Hit:          deleted,
 		DeletedItems: deletedItems,
-		DurationUs:   time.Since(started).Microseconds(),
 	})
 }
 
@@ -131,10 +121,8 @@ func (api *API) handleDeleteScope(w http.ResponseWriter, r *http.Request) {
 // N calls and not atomic, whereas a server-side wipe is one lock and one
 // map replacement.
 func (api *API) handleWipe(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
-
 	if r.Method != http.MethodPost {
-		methodNotAllowed(w, started, http.MethodPost)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -150,6 +138,5 @@ func (api *API) handleWipe(w http.ResponseWriter, r *http.Request) {
 		DeletedScopes: deletedScopes,
 		DeletedItems:  deletedItems,
 		FreedMB:       MB(freedBytes),
-		DurationUs:    time.Since(started).Microseconds(),
 	})
 }
