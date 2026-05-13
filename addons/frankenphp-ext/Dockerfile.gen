@@ -1,0 +1,70 @@
+# Dockerfile.gen — cached build environment for the scopecache
+# FrankenPHP extension. Built once (~3 min), reused on every
+# subsequent `build.sh` run (~0 sec to validate the cache, then the
+# actual extension build runs).
+#
+# What this image bakes in:
+#
+#   1. The base 1.12 builder image — PHP-ZTS headers, Go toolchain,
+#      gen_stub.php at /usr/local/lib/php/build/gen_stub.php, and the
+#      bundled FrankenPHP source at /go/src/app that xcaddy --withs.
+#   2. /usr/local/bin/frankenphp-gen — a frankenphp binary built from
+#      master so the `extension-init` subcommand is present (the 1.12
+#      release does not ship it). The full clone is removed after the
+#      build so the image stays under ~2 GB.
+#   3. /usr/local/bin/xcaddy — extracted from caddy:builder because
+#      the Go 1.26.x toolchain in this image regresses on cgo `go
+#      install`, breaking the obvious `go install xcaddy@latest` path.
+#   4. ENV GEN_STUB_SCRIPT pointing at the known location of the PHP
+#      stub-generator script. extension-init defaults to a different
+#      path in some PHP builder images; we make this explicit and
+#      verify the file at image build time so wrong values fail loudly.
+#
+# Invalidation (when to rebuild the image):
+#
+#   - Bumping the FROM tag (FrankenPHP version) below.
+#   - Wanting a newer frankenphp@main — the RUN below pins to whatever
+#     master was at image-build time, so a `--no-cache` rebuild picks
+#     up upstream changes to extension-init.
+#   - Editing this file.
+#
+# Force a clean rebuild:
+#
+#   docker build --no-cache -t scopecache-ext-builder:latest \
+#       -f Dockerfile.gen .
+#
+# Stage 1: source for xcaddy. Extracted via COPY --from below.
+FROM caddy:builder AS xcaddy-src
+
+# Stage 2: the actual builder image consumers use.
+FROM dunglas/frankenphp:1.12-builder-php8
+
+# Build frankenphp-gen from master. The 1.12 release does not ship the
+# extension-init subcommand we need; master does. We only need the
+# generator binary — the actual xcaddy build later uses the bundled
+# FrankenPHP source at /go/src/app (which is pinned to this image's
+# PHP-ZTS headers, so cgo links cleanly).
+RUN set -eux && \
+    git clone --depth=1 https://github.com/php/frankenphp /tmp/fp-master && \
+    cd /tmp/fp-master/caddy/frankenphp && \
+    CGO_CFLAGS="$(php-config --includes)" \
+    CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
+        go build -o /usr/local/bin/frankenphp-gen . && \
+    /usr/local/bin/frankenphp-gen --help 2>&1 | grep -q extension-init && \
+    rm -rf /tmp/fp-master /root/.cache/go-build
+
+# xcaddy from caddy:builder — see header comment for why we can't
+# `go install` it inside this image.
+COPY --from=xcaddy-src /usr/bin/xcaddy /usr/local/bin/xcaddy
+
+# Where the PHP stub-generator script lives in this builder image.
+# Pinned + verified so wrong-path images fail at build time, not at
+# extension-init time inside the inner build.
+ENV GEN_STUB_SCRIPT=/usr/local/lib/php/build/gen_stub.php
+RUN test -f "$GEN_STUB_SCRIPT" || { \
+        echo "ERROR: gen_stub.php not at $GEN_STUB_SCRIPT — bumping FrankenPHP version?" >&2; \
+        find /usr/local -name gen_stub.php 2>/dev/null >&2; \
+        exit 1; \
+    }
+
+WORKDIR /work
