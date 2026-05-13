@@ -83,10 +83,12 @@ import "C"
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/VeloxCoding/scopecache"
+	"github.com/dunglas/frankenphp"
 )
 
 // defaultSlot is the atomic *Gateway slot for the "default" name,
@@ -615,4 +617,117 @@ func scopecache_scopelist(prefix *C.zend_string, after *C.zend_string, limit int
 		return nil
 	}
 	return phpStringFromBytes(bytes)
+}
+
+// phpArrayToGroupedItems converts the nested PHP array shape used by
+// scopecache_warm / scopecache_rebuild into scopecache's
+// map[string][]Item input. PHP shape:
+//
+//	['scope-a' => [['id' => 'x', 'payload' => '{...}'], ...], 'scope-b' => [...]]
+//
+// Inner item keys: 'payload' required (string); 'id' optional
+// (missing/empty = seq-only item). The outer key fills Item.Scope —
+// any inner 'scope' field is ignored so callers cannot diverge from
+// the bulk's implicit grouping.
+//
+// Returns nil + error on any structural mismatch. Partial conversion
+// is never useful: Gateway.Warm/Rebuild validates the full input
+// atomically before any shard lock, so half-converted state would
+// produce a 0-return anyway. Returning early on the first bad item
+// also keeps the diagnostic clean.
+//
+// Lifetime safety: frankenphp.GoMap copies all PHP-string bytes via
+// GoString (C.GoStringN), so the returned Go strings are Go-owned
+// and safe to retain in scopecache's internal map keys — no UAF
+// concern like pitfall #12.
+func phpArrayToGroupedItems(arr *C.zend_array) (map[string][]scopecache.Item, error) {
+	if arr == nil {
+		return nil, fmt.Errorf("nil array")
+	}
+	raw, err := frankenphp.GoMap[[]any](unsafe.Pointer(arr))
+	if err != nil {
+		return nil, fmt.Errorf("GoMap: %w", err)
+	}
+	out := make(map[string][]scopecache.Item, len(raw))
+	for scope, items := range raw {
+		goItems := make([]scopecache.Item, 0, len(items))
+		for i, anyItem := range items {
+			assoc, ok := anyItem.(frankenphp.AssociativeArray[any])
+			if !ok {
+				return nil, fmt.Errorf("scope %q item %d: not an associative array (got %T)", scope, i, anyItem)
+			}
+			payloadAny, hasPayload := assoc.Map["payload"]
+			if !hasPayload {
+				return nil, fmt.Errorf("scope %q item %d: missing 'payload' key", scope, i)
+			}
+			payload, ok := payloadAny.(string)
+			if !ok {
+				return nil, fmt.Errorf("scope %q item %d: 'payload' is not a string (got %T)", scope, i, payloadAny)
+			}
+			id, _ := assoc.Map["id"].(string) // optional; missing/non-string -> "" (seq-only)
+			goItems = append(goItems, scopecache.Item{
+				Scope:   scope,
+				ID:      id,
+				Payload: []byte(payload),
+			})
+		}
+		out[scope] = goItems
+	}
+	return out, nil
+}
+
+// scopecache_warm replaces the contents of every scope present in
+// `grouped`. Scopes NOT in `grouped` are left untouched. Returns the
+// number of scopes affected; 0 on any error (no Caddy module, shape
+// validation failure, capacity exhausted, reserved-scope target).
+//
+// Typical use: init-script pattern — a PHP boot-time script reads
+// from the source-of-truth (DB, JSON file) and warms a fixed set of
+// scopes in one call, avoiding the cgo + lock-acquisition cost of
+// many small appends.
+//
+// export_php:function scopecache_warm(array $grouped): int
+func scopecache_warm(grouped *C.zend_array) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	goGrouped, err := phpArrayToGroupedItems(grouped)
+	if err != nil {
+		return 0
+	}
+	n, err := gw.Warm(goGrouped)
+	if err != nil {
+		return 0
+	}
+	return int64(n)
+}
+
+// scopecache_rebuild atomically replaces the entire user-managed
+// cache state with `grouped`. Reserved scopes (_events, _inbox) are
+// wiped and re-created under the same all-shard write lock.
+// Returns the scope_count after the rebuild; 0 on any error.
+//
+// Use case: full reset to a known good state — typically the
+// init-script pattern after a crash, where every relevant scope
+// must come back to its source-of-truth contents and any leftover
+// scopes must disappear. Differs from scopecache_warm in that warm
+// only touches scopes named in the input; rebuild also drops
+// anything not named.
+//
+// export_php:function scopecache_rebuild(array $grouped): int
+func scopecache_rebuild(grouped *C.zend_array) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	goGrouped, err := phpArrayToGroupedItems(grouped)
+	if err != nil {
+		return 0
+	}
+	n, _, err := gw.Rebuild(goGrouped)
+	if err != nil {
+		return 0
+	}
+	return int64(n)
 }

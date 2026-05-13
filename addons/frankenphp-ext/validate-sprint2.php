@@ -42,6 +42,8 @@ foreach ([
     'scopecache_wipe',
     'scopecache_stats',
     'scopecache_scopelist',
+    'scopecache_warm',
+    'scopecache_rebuild',
 ] as $fn) {
     check("function_exists $fn", function_exists($fn));
 }
@@ -186,7 +188,77 @@ $list_filtered = json_decode($list_filtered_json, true);
 check("scopelist with prefix 'v2-' returns non-empty array",
     is_array($list_filtered) && count($list_filtered) > 0);
 
-// --- 12. wipe ----------------------------------------------------------------
+// --- 12. warm: replace contents of selected scopes ---------------------------
+$warm_scope_a = "v2-warm-a-$rand";
+$warm_scope_b = "v2-warm-b-$rand";
+
+$warm_input = [
+    $warm_scope_a => [
+        ['id' => 'one',   'payload' => json_encode(['v' => 1])],
+        ['id' => 'two',   'payload' => json_encode(['v' => 2])],
+        ['payload' => json_encode(['seq_only' => true])],   // no id
+    ],
+    $warm_scope_b => [
+        ['id' => 'alpha', 'payload' => json_encode(['letter' => 'a'])],
+    ],
+];
+
+$warm_n = scopecache_warm($warm_input);
+check("warm with 2 scopes returns 2", $warm_n === 2, "got $warm_n");
+
+$warm_tail_a = scopecache_tail($warm_scope_a, 10);
+check("warm-target A has 3 items after the call",
+    is_array($warm_tail_a) && count($warm_tail_a) === 3);
+check("warm-target A item-one has the warmed payload",
+    scopecache_get($warm_scope_a, 'one') === json_encode(['v' => 1]));
+
+$warm_tail_b = scopecache_tail($warm_scope_b, 10);
+check("warm-target B has 1 item after the call",
+    is_array($warm_tail_b) && count($warm_tail_b) === 1);
+
+// --- 13. warm error path: missing payload -----------------------------------
+$bad_warm = scopecache_warm([
+    "v2-bad-$rand" => [['id' => 'a']], // payload key missing
+]);
+check("warm with missing payload returns 0", $bad_warm === 0,
+    "got $bad_warm");
+
+// --- 14. warm rejects reserved scopes ---------------------------------------
+$reserved_warm = scopecache_warm([
+    '_events' => [['id' => 'oops', 'payload' => '"x"']],
+]);
+check("warm targeting _events returns 0 (reserved)", $reserved_warm === 0,
+    "got $reserved_warm");
+
+// --- 15. rebuild: atomic full-state replace ---------------------------------
+$rebuild_scope = "v2-rebuild-$rand";
+$rebuild_input = [
+    $rebuild_scope => [
+        ['id' => 'r1', 'payload' => '"first"'],
+        ['id' => 'r2', 'payload' => '"second"'],
+        ['id' => 'r3', 'payload' => '"third"'],
+    ],
+];
+
+// Pre-seed an unrelated user scope to verify rebuild WIPES it (rebuild
+// is the "drop everything user-managed + apply input" primitive).
+$soon_to_be_dropped = "v2-pre-rebuild-$rand";
+scopecache_append($soon_to_be_dropped, 'leftover', '"x"');
+$pre_tail = scopecache_tail($soon_to_be_dropped, 1);
+check("pre-rebuild: leftover scope exists", is_array($pre_tail) && count($pre_tail) === 1);
+
+$rebuild_n = scopecache_rebuild($rebuild_input);
+check("rebuild returns positive scope count", $rebuild_n >= 1, "got $rebuild_n");
+
+$post_rebuild_dropped = scopecache_tail($soon_to_be_dropped, 1);
+check("rebuild dropped the pre-existing user scope",
+    $post_rebuild_dropped === null);
+
+$post_rebuild_target = scopecache_tail($rebuild_scope, 10);
+check("rebuild target has 3 items",
+    is_array($post_rebuild_target) && count($post_rebuild_target) === 3);
+
+// --- 16. wipe ----------------------------------------------------------------
 // Run this LAST because it nukes every scope including the ones we use
 // in earlier sections. Verify the count is plausible (>= the scopes we
 // created).
