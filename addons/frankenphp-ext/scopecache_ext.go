@@ -54,6 +54,7 @@ import (
 	"unsafe"
 
 	"github.com/VeloxCoding/scopecache"
+	"github.com/dunglas/frankenphp"
 )
 
 // defaultSlot is the atomic *Gateway slot for the "default" name,
@@ -78,6 +79,17 @@ func zendStringView(s *C.zend_string) string {
 		return ""
 	}
 	return unsafe.String((*byte)(unsafe.Pointer(&s.val)), int(s.len))
+}
+
+// zendStringBytes returns a []byte view over a zend_string, no copy.
+// Same lifetime contract as zendStringView. Used for payload bytes
+// that scopecache.Append immediately clones at the Gateway boundary,
+// so retention by scopecache is not an issue.
+func zendStringBytes(s *C.zend_string) []byte {
+	if s == nil {
+		return nil
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(&s.val)), int(s.len))
 }
 
 // phpStringFromBytes emalloc's a fresh zend_string in the PHP request
@@ -136,4 +148,84 @@ func scopecache_get(scope *C.zend_string, id *C.zend_string) unsafe.Pointer {
 		return nil
 	}
 	return phpStringFromBytes(item.Payload)
+}
+
+// scopecache_tail returns the newest `limit` items in scope, oldest-
+// first within the window. Each array element is the verbatim JSON
+// payload bytes of one item (same shape as scopecache_get returns).
+//
+// Wire shape (PHP-visible):
+//
+//	scopecache_tail(string $scope, int $limit): ?array
+//
+// Distinguishes "no scope" from "empty scope":
+//   - no Caddy module loaded → null
+//   - scope does not exist → null
+//   - scope exists, zero items → []     (empty array, not null)
+//   - scope exists, N items → [payload1, payload2, ...]
+//
+// The null-vs-empty-array distinction relies on the build-time
+// wrapper patch (RETURN_EMPTY_ARRAY → RETURN_NULL): when Go returns
+// a nil unsafe.Pointer, PHP sees null; when Go returns a non-nil
+// PHPPackedArray (even of zero elements), PHP sees an array.
+//
+// Per-element cost is dominated by the PHPPackedArray helper's
+// detour for each string ([]byte → string → zend_string_init). A
+// future optimisation could build the array element-by-element with
+// phpStringFromBytes-style helpers; for Sprint 1 the readability of
+// PHPPackedArray wins.
+//
+// export_php:function scopecache_tail(string $scope, int $limit): ?array
+func scopecache_tail(scope *C.zend_string, limit int64) unsafe.Pointer {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return nil
+	}
+	items, _, found := gw.Tail(zendStringView(scope), int(limit), 0)
+	if !found {
+		return nil
+	}
+	payloads := make([]any, len(items))
+	for i, item := range items {
+		payloads[i] = string(item.Payload)
+	}
+	return frankenphp.PHPPackedArray(payloads)
+}
+
+// scopecache_append inserts a new item with cache-assigned seq and
+// returns the assigned seq. The payload bytes must be valid JSON
+// (any JSON value — object, array, string, number, etc.); shape
+// validation lives at the *Gateway boundary.
+//
+// Wire shape (PHP-visible):
+//
+//	scopecache_append(string $scope, string $id, string $payload): int
+//
+// Returns:
+//   - seq (>= 1) on success
+//   - 0 on any error: no Caddy module loaded, shape validation
+//     failure, capacity exceeded, duplicate id within scope. seq=0
+//     is never a real assigned seq (the counter starts at 1), so
+//     this sentinel is unambiguous.
+//
+// Sprint-3 plan: replace the 0-sentinel with PHP exceptions so
+// callers can distinguish error categories. For Sprint 1 the
+// sentinel keeps the cgo signature simple.
+//
+// export_php:function scopecache_append(string $scope, string $id, string $payload): int
+func scopecache_append(scope *C.zend_string, id *C.zend_string, payload *C.zend_string) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	item := scopecache.Item{
+		Scope:   zendStringView(scope),
+		ID:      zendStringView(id),
+		Payload: zendStringBytes(payload),
+	}
+	result, err := gw.Append(item)
+	if err != nil {
+		return 0
+	}
+	return int64(result.Seq)
 }

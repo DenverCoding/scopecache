@@ -82,28 +82,77 @@ if [ -z "$OUT" ]; then
     exit 1
 fi
 
-# Validate the three expected outcomes. test.php uses var_dump, so
-# the hit prints `string(N) "..."` and the misses print `NULL`.
+# Validate the expected outcomes. test.php uses var_dump, so a hit on
+# scopecache_get prints `string(N) "..."` and misses print `NULL`.
+# scopecache_append prints `seq=<n>`. scopecache_tail prints either
+# `array(N) {...}` (hit) or `NULL` (miss).
 fail=0
 
+# --- scopecache_get -----------------------------------------------------------
+
 if echo "$OUT" | grep -qE "scopecache_get\('demo', 'hello'\) -> string\("; then
-    echo "  PASS  hit: scopecache_get('demo', 'hello') returned a string"
+    echo "  PASS  get hit: scopecache_get('demo', 'hello') returned a string"
 else
-    echo "  FAIL  hit: scopecache_get('demo', 'hello') did NOT return a string" >&2
+    echo "  FAIL  get hit: scopecache_get('demo', 'hello') did NOT return a string" >&2
     fail=1
 fi
 
 if echo "$OUT" | grep -qE "scopecache_get\('demo', 'no-such-item'\) -> NULL"; then
-    echo "  PASS  miss (unknown id): returned NULL"
+    echo "  PASS  get miss (unknown id): returned NULL"
 else
-    echo "  FAIL  miss (unknown id): expected NULL" >&2
+    echo "  FAIL  get miss (unknown id): expected NULL" >&2
     fail=1
 fi
 
 if echo "$OUT" | grep -qE "scopecache_get\('no-such-scope', 'hello'\) -> NULL"; then
-    echo "  PASS  miss (unknown scope): returned NULL"
+    echo "  PASS  get miss (unknown scope): returned NULL"
 else
-    echo "  FAIL  miss (unknown scope): expected NULL" >&2
+    echo "  FAIL  get miss (unknown scope): expected NULL" >&2
+    fail=1
+fi
+
+# --- scopecache_append --------------------------------------------------------
+
+# Append into demo: seq must be a positive integer (>= 1; 0 is the
+# error sentinel). Match `seq=<positive int>`.
+if echo "$OUT" | grep -qE "scopecache_append\('demo', 'php-write-[0-9a-f]+', \.\.\.\) -> seq=[1-9][0-9]*"; then
+    echo "  PASS  append into existing scope: seq>=1"
+else
+    echo "  FAIL  append into 'demo': expected seq>=1" >&2
+    fail=1
+fi
+
+# The just-appended item must be readable back via scopecache_get
+# (proves shared *Gateway between write and read paths).
+if echo "$OUT" | grep -qE "scopecache_get\('demo', 'php-write-[0-9a-f]+'\) -> string\("; then
+    echo "  PASS  append read-back: scopecache_get sees the just-written item"
+else
+    echo "  FAIL  append read-back: scopecache_get did NOT see the just-written item" >&2
+    fail=1
+fi
+
+# Bootstrap: appending to a never-seen scope creates it. seq must be >= 1.
+if echo "$OUT" | grep -qE "scopecache_append\('php-side-scope', 'bootstrap-[0-9a-f]+', '\"hi\"'\) -> seq=[1-9][0-9]*"; then
+    echo "  PASS  append into fresh scope: created + seq>=1"
+else
+    echo "  FAIL  append into 'php-side-scope': expected seq>=1" >&2
+    fail=1
+fi
+
+# --- scopecache_tail ----------------------------------------------------------
+
+# var_dump on a non-empty array prints `array(N) {` then per-element body.
+if echo "$OUT" | grep -qE "scopecache_tail\('demo', 5\) -> array\([1-9]"; then
+    echo "  PASS  tail hit: scopecache_tail('demo', 5) returned a non-empty array"
+else
+    echo "  FAIL  tail hit: scopecache_tail('demo', 5) did NOT return an array" >&2
+    fail=1
+fi
+
+if echo "$OUT" | grep -qE "scopecache_tail\('no-such-scope', 5\) -> NULL"; then
+    echo "  PASS  tail miss (unknown scope): returned NULL"
+else
+    echo "  FAIL  tail miss (unknown scope): expected NULL" >&2
     fail=1
 fi
 
