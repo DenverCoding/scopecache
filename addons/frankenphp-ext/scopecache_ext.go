@@ -54,15 +54,39 @@
 
 package scopecache_ext
 
-// #include <Zend/zend_string.h>
+/*
+#include <php.h>
+
+// Inline cgo-visible wrappers around PHP's ZVAL_* macros and a few
+// utility helpers. cgo cannot call C macros directly, so each macro
+// gets a tiny static-inline trampoline. Same pattern frankenphp's
+// types.go uses internally (their __zval_*__ helpers), kept under
+// our own naming so it is clear at the call site that the symbol
+// lives in this addon, not in upstream frankenphp. <php.h> is the
+// master include that pulls in zend_types.h (zval, ZVAL_*),
+// zend_string.h (zend_string_init), zend_hash.h
+// (zend_hash_next_index_insert, zend_new_array) and everything
+// else PHP-API-side.
+static inline void sc_zval_str(zval *zv, zend_string *s) {
+    ZVAL_STR(zv, s);
+}
+static inline void sc_zval_empty_string(zval *zv) {
+    ZVAL_EMPTY_STRING(zv);
+}
+// zend_new_array itself is a macro expanding to _zend_new_array(size);
+// cgo cannot call macros, so trampoline it.
+static inline zend_array *sc_zend_new_array(uint32_t size) {
+    return zend_new_array(size);
+}
+*/
 import "C"
 
 import (
+	"encoding/json"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/VeloxCoding/scopecache"
-	"github.com/dunglas/frankenphp"
 )
 
 // defaultSlot is the atomic *Gateway slot for the "default" name,
@@ -116,6 +140,53 @@ func zendStringCopy(s *C.zend_string) string {
 		return ""
 	}
 	return C.GoStringN((*C.char)(unsafe.Pointer(&s.val)), C.int(s.len))
+}
+
+// phpPackedArrayFromItems builds a packed PHP zend_array where each
+// element is a zend_string constructed directly from the corresponding
+// scopecache.Item.Payload bytes. Bypasses frankenphp.PHPPackedArray
+// to drop per-element overhead:
+//
+//   - no []any boxing of each element (1 interface-alloc avoided)
+//   - no string(payload) conversion (1 byte-copy avoided)
+//   - no per-element zval emalloc + efree (2 cgo calls + alloc avoided)
+//   - no type-switch dispatch in phpValue
+//
+// One stack-allocated zval is reused across iterations — zend_hash
+// copies the zval contents on insert, so reuse is safe. The
+// zend_strings carry refcount=1 owned by the array slot; the
+// wrapper's RETURN_ARR transfers ownership to PHP, which drops the
+// reference at request end.
+//
+// Per-element cost target: ~100 ns/elt vs the ~200 ns of the
+// generic frankenphp.PHPPackedArray path. See pitfall #N in the
+// addon notes (CLAUDE_PHPEXTENSION_IN_GO.md) for the design
+// rationale and the projected curve.
+//
+// Returns nil ONLY for a nil input slice — an EMPTY slice still
+// returns a non-nil zend_array so the wrapper emits an empty PHP
+// array (`[]`), distinguishing it from PHP `null` for callers.
+func phpPackedArrayFromItems(items []scopecache.Item) unsafe.Pointer {
+	if items == nil {
+		return nil
+	}
+	arr := C.sc_zend_new_array(C.uint32_t(len(items)))
+	var zv C.zval
+	for i := range items {
+		payload := items[i].Payload
+		if len(payload) == 0 {
+			C.sc_zval_empty_string(&zv)
+		} else {
+			zs := C.zend_string_init(
+				(*C.char)(unsafe.Pointer(&payload[0])),
+				C.size_t(len(payload)),
+				C._Bool(false),
+			)
+			C.sc_zval_str(&zv, zs)
+		}
+		C.zend_hash_next_index_insert(arr, &zv)
+	}
+	return unsafe.Pointer(arr)
 }
 
 // phpStringFromBytes emalloc's a fresh zend_string in the PHP request
@@ -195,12 +266,6 @@ func scopecache_get(scope *C.zend_string, id *C.zend_string) unsafe.Pointer {
 // a nil unsafe.Pointer, PHP sees null; when Go returns a non-nil
 // PHPPackedArray (even of zero elements), PHP sees an array.
 //
-// Per-element cost is dominated by the PHPPackedArray helper's
-// detour for each string ([]byte → string → zend_string_init). A
-// future optimisation could build the array element-by-element with
-// phpStringFromBytes-style helpers; for Sprint 1 the readability of
-// PHPPackedArray wins.
-//
 // export_php:function scopecache_tail(string $scope, int $limit): ?array
 func scopecache_tail(scope *C.zend_string, limit int64) unsafe.Pointer {
 	gw := defaultSlot.Load()
@@ -211,11 +276,80 @@ func scopecache_tail(scope *C.zend_string, limit int64) unsafe.Pointer {
 	if !found {
 		return nil
 	}
-	payloads := make([]any, len(items))
-	for i, item := range items {
-		payloads[i] = string(item.Payload)
+	return phpPackedArrayFromItems(items)
+}
+
+// scopecache_head returns the oldest items in scope with seq > afterSeq,
+// up to `limit`. Companion to scopecache_tail — same null-vs-empty-array
+// rules and same per-element array-construction shape.
+//
+// Use afterSeq=0 to start from the beginning of the scope. Returned items
+// are seq-ascending (oldest first); the next call passes the last returned
+// seq as afterSeq to paginate forward.
+//
+// export_php:function scopecache_head(string $scope, int $after_seq, int $limit): ?array
+func scopecache_head(scope *C.zend_string, afterSeq int64, limit int64) unsafe.Pointer {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return nil
 	}
-	return frankenphp.PHPPackedArray(payloads)
+	items, _, found := gw.Head(zendStringView(scope), uint64(afterSeq), int(limit))
+	if !found {
+		return nil
+	}
+	return phpPackedArrayFromItems(items)
+}
+
+// scopecache_get_by_seq looks up a single item by scope + seq. Same
+// shape as scopecache_get, just addressed by the cache-assigned seq
+// instead of the client-supplied id.
+//
+// export_php:function scopecache_get_by_seq(string $scope, int $seq): ?string
+func scopecache_get_by_seq(scope *C.zend_string, seq int64) unsafe.Pointer {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return nil
+	}
+	item, found := gw.GetBySeq(zendStringView(scope), uint64(seq))
+	if !found {
+		return nil
+	}
+	return phpStringFromBytes(item.Payload)
+}
+
+// scopecache_render_by_id returns the rendered (HTTP-wire-shape)
+// bytes for an item — same content as the body of GET /render?... in
+// the HTTP API. For pre-rendered JSON-string payloads this is the
+// shortcut path that bypasses re-serialisation; for other payload
+// shapes it re-emits the canonical JSON.
+//
+// export_php:function scopecache_render_by_id(string $scope, string $id): ?string
+func scopecache_render_by_id(scope *C.zend_string, id *C.zend_string) unsafe.Pointer {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return nil
+	}
+	bytes, found := gw.RenderByID(zendStringView(scope), zendStringView(id))
+	if !found {
+		return nil
+	}
+	return phpStringFromBytes(bytes)
+}
+
+// scopecache_render_by_seq returns the rendered bytes for an item
+// addressed by scope + seq.
+//
+// export_php:function scopecache_render_by_seq(string $scope, int $seq): ?string
+func scopecache_render_by_seq(scope *C.zend_string, seq int64) unsafe.Pointer {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return nil
+	}
+	bytes, found := gw.RenderBySeq(zendStringView(scope), uint64(seq))
+	if !found {
+		return nil
+	}
+	return phpStringFromBytes(bytes)
 }
 
 // scopecache_append inserts a new item with cache-assigned seq and
@@ -260,4 +394,225 @@ func scopecache_append(scope *C.zend_string, id *C.zend_string, payload *C.zend_
 		return 0
 	}
 	return int64(result.Seq)
+}
+
+// scopecache_upsert creates an item or replaces the payload of an
+// existing one at (scope, id). Returns the assigned seq on create,
+// the preserved seq on replace — same int either way. Returns 0 on
+// validation failure, capacity error, or missing gateway.
+//
+// Same map-key copy discipline as scopecache_append.
+//
+// export_php:function scopecache_upsert(string $scope, string $id, string $payload): int
+func scopecache_upsert(scope *C.zend_string, id *C.zend_string, payload *C.zend_string) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	item := scopecache.Item{
+		Scope:   zendStringCopy(scope),
+		ID:      zendStringCopy(id),
+		Payload: zendStringBytes(payload),
+	}
+	result, _, err := gw.Upsert(item)
+	if err != nil {
+		return 0
+	}
+	return int64(result.Seq)
+}
+
+// scopecache_update replaces the payload of an existing item at
+// (scope, id). Returns 1 if an item was updated, 0 if not found OR
+// on validation/error. Sprint 3 will disambiguate via exceptions;
+// callers that need to distinguish "no such item" from "validation
+// failure" must scopecache_get first.
+//
+// export_php:function scopecache_update(string $scope, string $id, string $payload): int
+func scopecache_update(scope *C.zend_string, id *C.zend_string, payload *C.zend_string) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	item := scopecache.Item{
+		Scope:   zendStringCopy(scope),
+		ID:      zendStringCopy(id),
+		Payload: zendStringBytes(payload),
+	}
+	n, err := gw.Update(item)
+	if err != nil {
+		return 0
+	}
+	return int64(n)
+}
+
+// scopecache_counter_add atomically adds `by` to the counter at
+// (scope, id) and returns the post-add value. Creates the counter
+// if missing (starts at 0 before the add, so first call with by=1
+// returns 1). Returns 0 on error — note that 0 is ALSO a valid
+// counter value, so this sentinel is ambiguous; Sprint 3 will fix
+// with exceptions.
+//
+// export_php:function scopecache_counter_add(string $scope, string $id, int $by): int
+func scopecache_counter_add(scope *C.zend_string, id *C.zend_string, by int64) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	value, _, err := gw.CounterAdd(zendStringCopy(scope), zendStringCopy(id), by)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+// scopecache_delete removes the item at (scope, id). Returns 1 if
+// an item was deleted, 0 if not found or on error.
+//
+// Scope/id are NOT retained by scopecache on this path — the delete
+// only takes the shard write-lock briefly and removes by-id from
+// the index maps. Aliases are safe.
+//
+// export_php:function scopecache_delete(string $scope, string $id): int
+func scopecache_delete(scope *C.zend_string, id *C.zend_string) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	n, err := gw.Delete(zendStringView(scope), zendStringView(id), 0)
+	if err != nil {
+		return 0
+	}
+	return int64(n)
+}
+
+// scopecache_delete_by_seq removes the item at (scope, seq). Returns
+// 1 if deleted, 0 if not found or on error. Companion to
+// scopecache_delete for the seq-addressed path.
+//
+// export_php:function scopecache_delete_by_seq(string $scope, int $seq): int
+func scopecache_delete_by_seq(scope *C.zend_string, seq int64) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	n, err := gw.Delete(zendStringView(scope), "", uint64(seq))
+	if err != nil {
+		return 0
+	}
+	return int64(n)
+}
+
+// scopecache_delete_up_to removes every item in scope with seq <=
+// maxSeq. The drain-stream primitive: subscribers tail items, then
+// delete_up_to the last seq they processed to free capacity. Returns
+// the deleted count, 0 on error.
+//
+// export_php:function scopecache_delete_up_to(string $scope, int $max_seq): int
+func scopecache_delete_up_to(scope *C.zend_string, maxSeq int64) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	n, err := gw.DeleteUpTo(zendStringView(scope), uint64(maxSeq))
+	if err != nil {
+		return 0
+	}
+	return int64(n)
+}
+
+// scopecache_delete_scope removes the entire scope and every item
+// in it. Returns the count of items deleted (which is also a rough
+// indicator of whether the scope existed: 0 = not found OR empty
+// scope). Reserved scopes (_events, _inbox) are rejected by
+// Gateway.DeleteScope and return 0 here.
+//
+// export_php:function scopecache_delete_scope(string $scope): int
+func scopecache_delete_scope(scope *C.zend_string) int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	n, _, err := gw.DeleteScope(zendStringView(scope))
+	if err != nil {
+		return 0
+	}
+	return int64(n)
+}
+
+// scopecache_wipe drops every scope (user-managed AND reserved),
+// resets the byte counter, then re-creates the reserved scopes
+// (_events, _inbox) under the same all-shard write lock so
+// subscribers do not observe a gap. Returns the pre-wipe
+// scope_count (including the reserved scopes that were dropped
+// and immediately re-created — a freshly-booted store wiped
+// immediately returns 2, not 0).
+//
+// Use with care: this is the equivalent of /wipe in the HTTP API,
+// not a per-scope clear.
+//
+// export_php:function scopecache_wipe(): int
+func scopecache_wipe() int64 {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return 0
+	}
+	scopeCount, _, _ := gw.Wipe()
+	return int64(scopeCount)
+}
+
+// scopecache_stats returns the store-wide snapshot as a JSON-encoded
+// string — identical shape to what GET /stats returns over HTTP, just
+// without the outer envelope. Callers typically `json_decode(..., true)`
+// to get a PHP associative array.
+//
+// JSON return (rather than a native PHP assoc-array) chosen for
+// Sprint 2 to avoid building a from-scratch assoc-array cgo helper
+// just for two functions (this one + scopecache_scopelist). The
+// PHP-side json_decode cost is ~1-3 µs for a typical stats payload —
+// fine for an observability call that fires once per request at most.
+//
+// Returns "" (empty string, which PHP sees as null via the wrapper-
+// patch on RETURN_EMPTY_STRING) when no Caddy module is loaded or
+// JSON marshalling fails (latter should be impossible given the
+// known struct shape).
+//
+// export_php:function scopecache_stats(): ?string
+func scopecache_stats() unsafe.Pointer {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return nil
+	}
+	stats := gw.Stats()
+	bytes, err := json.Marshal(stats)
+	if err != nil {
+		return nil
+	}
+	return phpStringFromBytes(bytes)
+}
+
+// scopecache_scopelist returns the per-scope detail rows as a
+// JSON-encoded array string. Same JSON-vs-native-array trade-off
+// as scopecache_stats — caller does json_decode to consume.
+//
+// Params:
+//
+//	$prefix — optional filter; pass "" for no filter.
+//	$after  — pagination cursor (scope name); pass "" to start
+//	          from the beginning.
+//	$limit  — page size.
+//
+// Returns "" / null on no Caddy module or JSON marshal failure.
+//
+// export_php:function scopecache_scopelist(string $prefix, string $after, int $limit): ?string
+func scopecache_scopelist(prefix *C.zend_string, after *C.zend_string, limit int64) unsafe.Pointer {
+	gw := defaultSlot.Load()
+	if gw == nil {
+		return nil
+	}
+	entries, _ := gw.ScopeList(zendStringView(prefix), zendStringView(after), int(limit))
+	bytes, err := json.Marshal(entries)
+	if err != nil {
+		return nil
+	}
+	return phpStringFromBytes(bytes)
 }
