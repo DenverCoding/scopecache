@@ -16,69 +16,105 @@
 // Cleanup(); consumers (typically a single hard-coded "default")
 // look it up at use time.
 //
-// Lifecycle on Caddy config reload (worth understanding):
+// Storage shape: a name maps to an atomic.Pointer slot, not directly
+// to a *Gateway. The slot is created lazily on first reference and
+// is stable for the process lifetime — only its contents swap when
+// RegisterGateway / DeregisterGatewayIf fires. This lets hot-path
+// consumers cache the slot once and call .Load() per use (~1-2 ns,
+// lock-free), instead of paying the registry's RLock on every call.
+// See LookupGatewaySlot below.
 //
-//   1. Old instance running, gw_old registered under "default".
-//   2. New Provision() runs first, overwrites the registration
-//      with gw_new under "default".
+// Lifecycle on Caddy config reload:
+//
+//   1. Old instance running, gw_old stored in the "default" slot.
+//   2. New Provision() runs first, atomically stores gw_new into the
+//      same slot. Any cached slot held by a consumer sees gw_new on
+//      the next Load.
 //   3. Caddy switches traffic to the new instance.
-//   4. Old Cleanup() runs.
+//   4. Old Cleanup() runs. DeregisterGatewayIf does a CAS: only
+//      stores nil if the slot still equals gw_old (it doesn't —
+//      step 2 already overwrote it). New registration intact.
 //
-// If step 4 blindly called RegisterGateway("default", nil) it would
-// clobber the new instance's registration. DeregisterGatewayIf
-// guards against this: it removes the entry only if it still points
-// at the caller's own gateway pointer. The caddymodule's Cleanup
-// uses DeregisterGatewayIf, so a normal reload keeps the new
-// registration intact while a clean shutdown still removes the
-// dangling pointer.
+// Map invariant: slots are never removed from the map. "Deregister"
+// = atomic Store(nil) into the slot. This preserves the slot pointer
+// any consumer already cached, so they keep observing the right
+// answer (currently nil) instead of holding a dangling reference to a
+// no-longer-mapped slot. The map can only grow by registered names,
+// which in practice is one ("default").
 //
-// In-flight cgo or Go calls holding a pointer obtained from a
-// previous LookupGateway stay valid: Go's GC will not free a
-// *Gateway anyone still references. Subsequent LookupGateway calls
-// pick up the new registration.
+// In-flight cgo or Go calls holding a *Gateway pointer obtained from
+// a previous Load() stay valid: Go's GC will not free a *Gateway
+// anyone still references. Subsequent Load()s pick up the new
+// pointer atomically.
 
 package scopecache
 
-import "sync"
-
-var (
-	registryMu sync.RWMutex
-	registry   = map[string]*Gateway{}
+import (
+	"sync"
+	"sync/atomic"
 )
 
-// RegisterGateway publishes gw under name. Pass a nil gw to remove
-// the registration unconditionally — use DeregisterGatewayIf instead
-// from Cleanup-style paths that must avoid clobbering a newer
-// registration during config reload.
-func RegisterGateway(name string, gw *Gateway) {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	if gw == nil {
-		delete(registry, name)
-		return
-	}
-	registry[name] = gw
-}
+var (
+	registryMu    sync.RWMutex
+	registrySlots = map[string]*atomic.Pointer[Gateway]{}
+)
 
-// LookupGateway returns the *Gateway registered under name, or nil
-// if nothing is registered there. Callers MUST handle nil — a
-// consumer running in a binary without the scopecache caddymodule,
-// or before Provision has completed, will see nil.
-func LookupGateway(name string) *Gateway {
+// slotForName returns the slot for name, lazily creating it under
+// the write lock when it doesn't yet exist. The returned slot is
+// stable for the process lifetime — callers may cache it.
+func slotForName(name string) *atomic.Pointer[Gateway] {
 	registryMu.RLock()
-	defer registryMu.RUnlock()
-	return registry[name]
-}
-
-// DeregisterGatewayIf removes the registration under name only if
-// the currently-registered Gateway is the exact gw passed in. This
-// is the safe deregister for caddymodule Cleanup: it preserves a
-// newer Provision's registration during reload while still cleaning
-// up the entry when the module is fully removed.
-func DeregisterGatewayIf(name string, gw *Gateway) {
+	slot, ok := registrySlots[name]
+	registryMu.RUnlock()
+	if ok {
+		return slot
+	}
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	if registry[name] == gw {
-		delete(registry, name)
+	if slot, ok = registrySlots[name]; ok {
+		return slot
 	}
+	slot = &atomic.Pointer[Gateway]{}
+	registrySlots[name] = slot
+	return slot
+}
+
+// RegisterGateway publishes gw under name. Pass a nil gw to clear
+// the slot unconditionally — use DeregisterGatewayIf instead from
+// Cleanup-style paths that must avoid clobbering a newer registration
+// during config reload.
+func RegisterGateway(name string, gw *Gateway) {
+	slotForName(name).Store(gw)
+}
+
+// LookupGateway returns the *Gateway currently registered under name,
+// or nil if nothing is registered there. Convenience wrapper around
+// LookupGatewaySlot().Load() — for hot-path consumers, cache the
+// slot once via LookupGatewaySlot and call .Load() per use instead.
+func LookupGateway(name string) *Gateway {
+	return slotForName(name).Load()
+}
+
+// LookupGatewaySlot returns the atomic slot for name, lazily creating
+// it if needed. The slot pointer is stable for the process lifetime —
+// callers cache it and call .Load() per use:
+//
+//	var defaultSlot = scopecache.LookupGatewaySlot("default")
+//	gw := defaultSlot.Load()  // ~1-2 ns, lock-free, picks up reloads
+//
+// If a slot is reachable before any RegisterGateway fires for that
+// name (e.g. an init-time lookup that races ahead of Caddy's
+// Provision), Load returns nil; the caller must handle that. When
+// Provision later Stores into the slot, the cached pointer
+// transparently picks up the new value on the next Load.
+func LookupGatewaySlot(name string) *atomic.Pointer[Gateway] {
+	return slotForName(name)
+}
+
+// DeregisterGatewayIf atomically clears the slot only if its current
+// pointer equals gw. Safe for caddymodule Cleanup paths: preserves a
+// newer Provision's registration during reload, while still clearing
+// the slot when the module is fully removed.
+func DeregisterGatewayIf(name string, gw *Gateway) {
+	slotForName(name).CompareAndSwap(gw, nil)
 }
