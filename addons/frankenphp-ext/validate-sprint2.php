@@ -209,12 +209,42 @@ check("warm with 2 scopes returns 2", $warm_n === 2, "got $warm_n");
 $warm_tail_a = scopecache_tail($warm_scope_a, 10);
 check("warm-target A has 3 items after the call",
     is_array($warm_tail_a) && count($warm_tail_a) === 3);
-check("warm-target A item-one has the warmed payload",
+
+// Byte-exact round-trip per item in scope A — both id-addressed items
+// (get) and the seq-only one (compare via tail position; tail returns
+// oldest-first within the window, matching insertion order from the
+// warm-input array).
+check("warm A: item-one byte-exact via scopecache_get",
     scopecache_get($warm_scope_a, 'one') === json_encode(['v' => 1]));
+check("warm A: item-two byte-exact via scopecache_get",
+    scopecache_get($warm_scope_a, 'two') === json_encode(['v' => 2]));
+check("warm A: tail order matches input order",
+    is_array($warm_tail_a)
+    && $warm_tail_a[0] === json_encode(['v' => 1])
+    && $warm_tail_a[1] === json_encode(['v' => 2])
+    && $warm_tail_a[2] === json_encode(['seq_only' => true]));
 
 $warm_tail_b = scopecache_tail($warm_scope_b, 10);
 check("warm-target B has 1 item after the call",
     is_array($warm_tail_b) && count($warm_tail_b) === 1);
+check("warm B: item-alpha byte-exact via scopecache_get",
+    scopecache_get($warm_scope_b, 'alpha') === json_encode(['letter' => 'a']));
+check("warm B: tail content matches input",
+    is_array($warm_tail_b)
+    && $warm_tail_b[0] === json_encode(['letter' => 'a']));
+
+// Cross-scope leak: scope A must not contain scope B's payload, and vice versa.
+check("warm: scope A does NOT contain scope B's payload",
+    is_array($warm_tail_a)
+    && !in_array(json_encode(['letter' => 'a']), $warm_tail_a, true));
+check("warm: scope B does NOT contain scope A's payload",
+    is_array($warm_tail_b)
+    && !in_array(json_encode(['v' => 1]), $warm_tail_b, true));
+
+// Get on a definitely-NOT-warmed id in scope A must still return null
+// (proves warm did not over-populate; ids stay strictly as given).
+check("warm A: get of a non-warmed id returns null",
+    scopecache_get($warm_scope_a, 'definitely-not-warmed') === null);
 
 // --- 13. warm error path: missing payload -----------------------------------
 $bad_warm = scopecache_warm([
@@ -257,6 +287,30 @@ check("rebuild dropped the pre-existing user scope",
 $post_rebuild_target = scopecache_tail($rebuild_scope, 10);
 check("rebuild target has 3 items",
     is_array($post_rebuild_target) && count($post_rebuild_target) === 3);
+
+// Byte-exact round-trip per rebuild item via scopecache_get.
+check("rebuild: r1 byte-exact via scopecache_get",
+    scopecache_get($rebuild_scope, 'r1') === '"first"');
+check("rebuild: r2 byte-exact via scopecache_get",
+    scopecache_get($rebuild_scope, 'r2') === '"second"');
+check("rebuild: r3 byte-exact via scopecache_get",
+    scopecache_get($rebuild_scope, 'r3') === '"third"');
+
+// Tail order matches input order (oldest-first within window).
+check("rebuild: tail order is r1, r2, r3",
+    is_array($post_rebuild_target)
+    && $post_rebuild_target[0] === '"first"'
+    && $post_rebuild_target[1] === '"second"'
+    && $post_rebuild_target[2] === '"third"');
+
+// Stats after rebuild: total item count should reflect EXACTLY what
+// we put in (3 items in the user scope, plus the two reserved scopes
+// _events / _inbox which rebuild re-creates).
+$stats_after_rebuild = json_decode(scopecache_stats(), true);
+check("rebuild: stats total_items >= 3 (input items present)",
+    is_array($stats_after_rebuild)
+    && ($stats_after_rebuild['TotalItems'] ?? 0) >= 3,
+    "TotalItems=" . ($stats_after_rebuild['TotalItems'] ?? 'n/a'));
 
 // --- 16. wipe ----------------------------------------------------------------
 // Run this LAST because it nukes every scope including the ones we use
