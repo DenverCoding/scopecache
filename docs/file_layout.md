@@ -87,9 +87,12 @@ caddy_module/                         (root module github.com/VeloxCoding/scopec
 │   └── module_test.go
 │
 ├── addons/                           (Go sub-packages built on the public *Gateway; mounted by both adapters)
-│   └── guarded/
-│       ├── guarded.go                ── /guarded-tail (bearer-token access; capID = base64url(sha256(token)))
-│       └── guarded_test.go
+│   ├── guarded/
+│   │   ├── guarded.go                ── /guarded-tail (bearer-token access; capID = base64url(sha256(token)))
+│   │   └── guarded_test.go
+│   └── frankenphp-ext/               ── FrankenPHP extension exposing *Gateway directly to PHP
+│       ├── scopecache_ext.go         ── //export_php directives + cgo trampolines + hand-rolled JSON-to-zval decoder
+│       └── go.mod
 │
 ├── docs/
 │   ├── scopecache-core-rfc.md        ── canonical core spec (operator-facing)
@@ -100,16 +103,26 @@ caddy_module/                         (root module github.com/VeloxCoding/scopec
 │   ├── Caddyfile                     ── smoke-test placeholder
 │   └── Caddyfile.caddyscope          ── working Caddy + scopecache demo
 │
+├── examples/                         (output of tools/; gitignored binaries, tracked READMEs)
+│   └── frankenphp-bin/               ── pre-built static FrankenPHP + scopecache binary + run-README
+│
 ├── scripts/
 │   └── drain_events.sh               ── reference subscriber-command (POSIX shell, drains _events)
+│
+├── tools/                            (build / validate / bench tooling per addon)
+│   ├── frankenphp-ext/               ── build the FrankenPHP-extension binary + smoke/validate/bench/compare
+│   └── frankenphp-bin/               ── build the standalone static FrankenPHP+scopecache binary
 │
 └── .github/workflows/
     ├── ci.yml                        (Go build + test on PR/push)
     ├── release.yml                   (release pipeline)
-    └── sync-caddymodule-tag.yml      (auto-bumps caddymodule pin on tag push)
+    └── sync-caddymodule-tag.yml      (manual-only recovery for the caddymodule pin)
 ```
 
-Addons live under `addons/<name>/` as Go sub-packages built on the public `*Gateway`. The first one is [`addons/guarded/`](../addons/guarded/) — bearer-token access for `/tail`. Both adapters (standalone + Caddy module) call each addon's `RegisterRoutes(mux, gw)` after their own core route registration, so addons ship standard with the package. See RFC §11 for the addon contract and worked example.
+Addons live under `addons/<name>/` as Go sub-packages built on the public `*Gateway`. Currently two:
+
+- [`addons/guarded/`](../addons/guarded/) — bearer-token access for `/tail`. Wired in via the standard `RegisterRoutes(mux, gw)` shape that both adapters call after core route registration, so guarded ships standard with the package. See RFC §11 for the contract.
+- [`addons/frankenphp-ext/`](../addons/frankenphp-ext/) — different shape: not a route-registering Go addon but a **`frankenphp-gen` consumer** that compiles into the FrankenPHP binary as a PHP extension. Exposes the `*Gateway` methods to PHP via cgo. Only relevant when scopecache and PHP run together in one FrankenPHP binary; ignored otherwise.
 
 ## Core file split: lock discipline, not handler grouping
 

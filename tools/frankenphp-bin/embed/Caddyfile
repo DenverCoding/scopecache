@@ -1,0 +1,24 @@
+# Embedded Caddyfile — bakt mee in de static binary.
+# Geen externe paden: root verwijst naar `public/` relatief aan de embed-FS.
+# Geen worker-mode, geen admin, geen TLS — minimale demo.
+
+{
+    admin off
+    order scopecache before php_server
+    log {
+        output stdout
+        format console
+    }
+}
+
+:8080 {
+    root * public
+
+    scopecache {
+        scope_max_items 1000
+        max_store_mb    16
+        max_item_mb     1
+    }
+
+    php_server
+}
