@@ -31,7 +31,11 @@
 
 package scopecache
 
-import gojson "github.com/goccy/go-json"
+import (
+	stdjson "encoding/json"
+
+	gojson "github.com/goccy/go-json"
+)
 
 // jsonMarshal is the production envelope-encoder. Used by
 // writeJSONResponse (every non-cap-protected handler response) and
@@ -48,3 +52,15 @@ var jsonUnmarshal = gojson.Unmarshal
 // every POST handler so MaxBytesReader-capped input streams without
 // a separate buffering step.
 var jsonNewDecoder = gojson.NewDecoder
+
+// jsonValid mirrors json.Valid: confirms the bytes are syntactically
+// well-formed JSON. validatePayload calls this on every write — every
+// /append, /upsert, /update, /counter_add.
+//
+// NOTE: pointed at stdlib, NOT goccy/go-json. Measurement 2026-05-14
+// (BenchmarkValid_*): stdlib 70 ns / 0 allocs vs goccy 769 ns / 17
+// allocs on a small object — 11x slower. Goccy's Valid appears to
+// allocate transient state we don't need; stdlib's is a hand-tuned
+// byte-scanning validator. This is the one call where stdlib wins
+// against goccy, and we want the fast path on every write.
+var jsonValid = stdjson.Valid

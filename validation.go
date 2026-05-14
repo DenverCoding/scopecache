@@ -155,7 +155,7 @@ func validatePayload(p json.RawMessage) error {
 	if len(p) == 0 || bytes.Equal(bytes.TrimSpace(p), []byte("null")) {
 		return errors.New("the 'payload' field is required")
 	}
-	if !json.Valid(p) {
+	if !jsonValid(p) {
 		return errors.New("the 'payload' field must be a valid JSON value")
 	}
 	if !utf8.Valid(p) {

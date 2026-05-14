@@ -8,6 +8,15 @@ import (
 	gojson "github.com/goccy/go-json"
 )
 
+// --- Auxiliary hot-path benches: Valid, Unmarshal-int, Unmarshal-string
+//
+// These cover validation.go, buffer_counter.go, and buffer_locked.go
+// respectively. All three live on the write path (every /append,
+// /upsert, /update, /counter_add); none of them was on the easy-to-
+// see HTTP-envelope path that earlier rounds covered. stdlib vs
+// goccy here decides whether routing the buffer-side calls through
+// jsonValid / jsonUnmarshal is a real win or noise.
+
 // bench_unmarshal_test.go — goccy/go-json-vs-stdlib comparison for
 // the itemsRequest payload. /warm and /rebuild both accept this shape:
 // a JSON object {"items":[{Item}, {Item}, ...]} where each Item is
@@ -79,3 +88,85 @@ func BenchmarkUnmarshal_itemsRequest_goccy_1000(b *testing.B)  { benchUnmarshalG
 // --- 10000 items (decision threshold per CLAUDE.md exception note) ---
 func BenchmarkUnmarshal_itemsRequest_stdlib_10000(b *testing.B) { benchUnmarshalStdlib(b, 10000) }
 func BenchmarkUnmarshal_itemsRequest_goccy_10000(b *testing.B)  { benchUnmarshalGoccy(b, 10000) }
+
+// --- json.Valid (validation.go validatePayload) ---
+
+func BenchmarkValid_stdlib_smallObj(b *testing.B) {
+	payload := []byte(`{"v":1,"name":"Alice","age":30}`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = json.Valid(payload)
+	}
+}
+
+func BenchmarkValid_goccy_smallObj(b *testing.B) {
+	payload := []byte(`{"v":1,"name":"Alice","age":30}`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = gojson.Valid(payload)
+	}
+}
+
+func BenchmarkValid_stdlib_1KiB(b *testing.B) {
+	payload := []byte(`{"data":"` + string(make([]byte, 1024)) + `"}`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = json.Valid(payload)
+	}
+}
+
+func BenchmarkValid_goccy_1KiB(b *testing.B) {
+	payload := []byte(`{"data":"` + string(make([]byte, 1024)) + `"}`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = gojson.Valid(payload)
+	}
+}
+
+// --- Unmarshal int (buffer_counter.go parseCounterValue) ---
+
+func BenchmarkUnmarshal_counterInt_stdlib(b *testing.B) {
+	payload := json.RawMessage(`42`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var num json.Number
+		_ = json.Unmarshal(payload, &num)
+	}
+}
+
+func BenchmarkUnmarshal_counterInt_goccy(b *testing.B) {
+	payload := json.RawMessage(`42`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var num json.Number
+		_ = gojson.Unmarshal(payload, &num)
+	}
+}
+
+// --- Unmarshal string (buffer_locked.go precomputeRenderBytes) ---
+
+func BenchmarkUnmarshal_renderString_stdlib(b *testing.B) {
+	payload := json.RawMessage(`"<html><body><h1>Hello, world</h1></body></html>"`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var s string
+		_ = json.Unmarshal(payload, &s)
+	}
+}
+
+func BenchmarkUnmarshal_renderString_goccy(b *testing.B) {
+	payload := json.RawMessage(`"<html><body><h1>Hello, world</h1></body></html>"`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var s string
+		_ = gojson.Unmarshal(payload, &s)
+	}
+}

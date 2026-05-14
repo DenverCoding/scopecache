@@ -27,7 +27,7 @@ func precomputeRenderBytes(payload json.RawMessage) []byte {
 		return nil
 	}
 	var s string
-	if err := json.Unmarshal(payload, &s); err != nil {
+	if err := jsonUnmarshal(payload, &s); err != nil {
 		return nil
 	}
 	return []byte(s)

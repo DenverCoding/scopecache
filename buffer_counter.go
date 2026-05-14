@@ -260,7 +260,7 @@ func (b *scopeBuffer) counterAddSlow(scope, id string, by int64) (int64, bool, e
 // safely operate on it.
 func parseCounterValue(payload json.RawMessage) (int64, error) {
 	var num json.Number
-	if err := json.Unmarshal(payload, &num); err != nil {
+	if err := jsonUnmarshal(payload, &num); err != nil {
 		return 0, &CounterPayloadError{Reason: "the existing item's payload is not a JSON number"}
 	}
 	v, err := num.Int64()

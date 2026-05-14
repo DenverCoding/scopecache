@@ -16,7 +16,6 @@
 package scopecache
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 )
@@ -390,7 +389,7 @@ func appendJSONString(dst []byte, s string) []byte {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c < 0x20 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' {
-			b, _ := json.Marshal(s)
+			b, _ := jsonMarshal(s)
 			return append(dst, b...)
 		}
 	}
