@@ -356,6 +356,101 @@ func BenchmarkHTTP_Append(b *testing.B) {
 func BenchmarkHTTP_Warm_1000(b *testing.B)  { benchHTTPWarm(b, 1000) }
 func BenchmarkHTTP_Warm_10000(b *testing.B) { benchHTTPWarm(b, 10000) }
 
+// buildComplexPayload returns a realistic-ish deeply-nested JSON
+// payload that exercises goccy's parser on the awkward corners:
+// 6-7 levels of nesting, mixed types, arrays of objects, escaped
+// strings (quotes, backslashes, unicode), null + bool + numeric
+// in the same object, scientific notation. ~2 KiB per payload.
+func buildComplexPayload(idx int) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{
+        "id": %d,
+        "user": {
+            "name": "user-%d",
+            "profile": {
+                "bio": "Multi-line\nbio with \"quotes\" and \\backslash and unicode é ü.",
+                "links": [
+                    {"type": "twitter", "handle": "@user%d", "verified": true},
+                    {"type": "github", "handle": "u-%d", "verified": false},
+                    {"type": "blog", "handle": null}
+                ],
+                "preferences": {
+                    "theme": "dark",
+                    "notifications": {
+                        "email": true,
+                        "push": false,
+                        "rules": [
+                            {"event": "reply",  "threshold": 0.95},
+                            {"event": "mention","threshold": 1.0e-3},
+                            {"event": "like",   "threshold": null}
+                        ]
+                    }
+                }
+            },
+            "stats": {
+                "posts": %d,
+                "followers": %d,
+                "score": 3.14159265358979,
+                "ratio": -1.5e-4,
+                "history": [{"day":"2026-01-01","count":42},{"day":"2026-01-02","count":7}]
+            }
+        },
+        "tags": ["tag-a","tag-b","tag-with-spaces","tag/with/slash","tag\"quoted\""],
+        "metadata": {
+            "created_at": "2026-05-14T08:00:00.123456Z",
+            "permissions": {
+                "read": ["public","friends"],
+                "write": ["self"],
+                "admin": []
+            },
+            "version": "1.0.0",
+            "deleted": false,
+            "archived_at": null
+        }
+    }`, idx, idx, idx, idx, idx*7, idx*13))
+}
+
+// BenchmarkHTTP_Warm_Complex_* mirrors BenchmarkHTTP_Warm_* but each
+// item's Payload is a 2 KiB nested-JSON document with mixed types,
+// escaped strings, scientific notation, and nulls. Goccy must parse
+// it cleanly on the way IN; the cache must round-trip the bytes
+// without mangling on the way OUT.
+//
+// Per-payload size ~2 KiB → body ~2 MB at 1000 items, ~20 MB at
+// 10000 items. Goes through maxBulkBytes guard at decodeBody.
+func BenchmarkHTTP_Warm_Complex_100(b *testing.B)  { benchHTTPWarmComplex(b, 100) }
+func BenchmarkHTTP_Warm_Complex_1000(b *testing.B) { benchHTTPWarmComplex(b, 1000) }
+
+func benchHTTPWarmComplex(b *testing.B, n int) {
+	client, _, _, cleanup := benchHTTPServer(b, 1, 1, 8)
+	defer cleanup()
+
+	items := make([]map[string]any, n)
+	for i := 0; i < n; i++ {
+		items[i] = map[string]any{
+			"scope":   fmt.Sprintf("warm-c-%d", i%50),
+			"id":      fmt.Sprintf("item-%d", i),
+			"payload": buildComplexPayload(i),
+		}
+	}
+	body, _ := json.Marshal(map[string]any{"items": items})
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		resp, err := client.Post("http://sock/warm", "application/json", bytes.NewReader(body))
+		if err != nil {
+			b.Fatalf("POST /warm: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode/100 != 2 {
+			b.Fatalf("POST /warm: status %d", resp.StatusCode)
+		}
+	}
+}
+
 func benchHTTPWarm(b *testing.B, n int) {
 	client, _, _, cleanup := benchHTTPServer(b, 1, 1, 8) // tiny seed; we replace
 	defer cleanup()
