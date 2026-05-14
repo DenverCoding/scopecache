@@ -16,7 +16,7 @@ module github.com/VeloxCoding/scopecache/caddymodule
 go 1.25.0
 
 require (
-	github.com/VeloxCoding/scopecache v0.8.24
+	github.com/VeloxCoding/scopecache v0.8.25
 	github.com/caddyserver/caddy/v2 v2.11.2
 )
 
@@ -56,6 +56,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-sql-driver/mysql v1.8.1 // indirect
+	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/cel-go v0.27.0 // indirect
