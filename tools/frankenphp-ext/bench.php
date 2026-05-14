@@ -64,14 +64,19 @@ for ($i = 0; $i < $TAIL_LIMIT; $i++) {
     scopecache_append($tail_scope, "item-$i", $payload);
 }
 
-// Sanity probes.
-$probe_get = scopecache_get($get_scope, "item-{$PAYLOAD}");
-if (!is_array($probe_get) || ($probe_get['hit'] ?? null) !== true) {
-    die("seed FAILED: get probe envelope " . var_export($probe_get, true) . "\n");
+// Sanity probes. Returns are JSON strings now; json_decode for the
+// presence check. The bench loops below measure the raw cgo call.
+$probe_get_arr = json_decode(scopecache_get($get_scope, "item-{$PAYLOAD}"), true);
+if (!is_array($probe_get_arr) || ($probe_get_arr['hit'] ?? null) !== true) {
+    die("seed FAILED: get probe envelope " . var_export($probe_get_arr, true) . "\n");
 }
-$probe_tail = scopecache_tail($tail_scope, $TAIL_LIMIT);
-if (!is_array($probe_tail) || ($probe_tail['count'] ?? -1) !== $TAIL_LIMIT) {
-    die("seed FAILED: tail count=" . ($probe_tail['count'] ?? 'null') . ", expected $TAIL_LIMIT\n");
+$probe_tail_arr = json_decode(scopecache_tail($tail_scope, $TAIL_LIMIT), true);
+if (!is_array($probe_tail_arr) || ($probe_tail_arr['count'] ?? -1) !== $TAIL_LIMIT) {
+    die("seed FAILED: tail count=" . ($probe_tail_arr['count'] ?? 'null') . ", expected $TAIL_LIMIT\n");
+}
+$probe_payload = scopecache_get_payload($get_scope, "item-{$PAYLOAD}");
+if (!is_string($probe_payload) || $probe_payload !== $payload) {
+    die("seed FAILED: get_payload probe " . var_export($probe_payload, true) . "\n");
 }
 
 printf("payload bytes : %d\n",  $payload_bytes);
@@ -98,11 +103,23 @@ echo "\n";
 printf("%-38s | %-12s | %-15s\n", "op", "per call", "throughput");
 printf("%s\n", str_repeat('-', 75));
 
-// scopecache_get.
+// scopecache_get_payload (cheapest single-read: payload bytes only).
+for ($i = 0; $i < $WARMUP; $i++) scopecache_get_payload($get_scope, "item-{$PAYLOAD}");
+$t0             = hrtime(true);
+for ($i = 0; $i < $ITER; $i++)   { $r = scopecache_get_payload($get_scope, "item-{$PAYLOAD}"); }
+$ns_get_payload = hrtime(true) - $t0;
+
+// scopecache_get (full envelope as JSON string).
 for ($i = 0; $i < $WARMUP; $i++) scopecache_get($get_scope, "item-{$PAYLOAD}");
 $t0     = hrtime(true);
 for ($i = 0; $i < $ITER; $i++)   { $r = scopecache_get($get_scope, "item-{$PAYLOAD}"); }
 $ns_get = hrtime(true) - $t0;
+
+// scopecache_get + PHP json_decode (cost when the PHP caller needs an
+// array — i.e. wants the envelope decoded into PHP-native form).
+$t0            = hrtime(true);
+for ($i = 0; $i < $ITER; $i++)   { $r = json_decode(scopecache_get($get_scope, "item-{$PAYLOAD}"), true); }
+$ns_get_decode = hrtime(true) - $t0;
 
 // scopecache_tail.
 for ($i = 0; $i < $WARMUP; $i++) scopecache_tail($tail_scope, $TAIL_LIMIT);
@@ -128,12 +145,18 @@ $row = function(string $label, float $ns, int $iter) {
         number_format($qps, 0, '.', ' ') . ' /s');
 };
 
-$row("scopecache_get",                                $ns_get,    $ITER);
-$row("scopecache_tail (limit=$TAIL_LIMIT)",           $ns_tail,   $ITER);
-$row("scopecache_append (seq-only, n=$APPEND_ITER)",  $ns_append, $APPEND_ITER);
+$row("scopecache_get_payload (payload bytes only)",   $ns_get_payload, $ITER);
+$row("scopecache_get (JSON envelope as string)",      $ns_get,         $ITER);
+$row("scopecache_get + json_decode (PHP array)",      $ns_get_decode,  $ITER);
+$row("scopecache_tail (limit=$TAIL_LIMIT)",           $ns_tail,        $ITER);
+$row("scopecache_append (seq-only, n=$APPEND_ITER)",  $ns_append,      $APPEND_ITER);
 
 echo "\n";
 printf("scopecache_tail per-element overhead : %.1f ns/elt\n",
     ($ns_tail / $ITER - $ns_get / $ITER) / $TAIL_LIMIT);
 printf("scopecache_append vs scopecache_get  : %.1fx (relative cost)\n",
     ($ns_append / $APPEND_ITER) / ($ns_get / $ITER));
+printf("envelope vs payload-only (cgo cost)  : %.1fx slower (extra envelope build)\n",
+    ($ns_get / $ITER) / ($ns_get_payload / $ITER));
+printf("PHP json_decode cost                 : %.0f ns/call\n",
+    ($ns_get_decode - $ns_get) / $ITER);

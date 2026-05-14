@@ -1,6 +1,9 @@
 <?php
-// test.php — minimal demo of the in-process PHP→scopecache call,
-// now returning HTTP-wire-shaped PHP arrays everywhere.
+// test.php — minimal demo of the in-process PHP→scopecache call.
+//
+// Every extension entry-point now returns a JSON STRING — byte-identical
+// to the HTTP-endpoint response body. PHP-side, the common pattern is
+// `json_decode($result, true)` to get an associative array.
 //
 // What this proves:
 //   - PHP can write to the cache via HTTP /append (goes through the
@@ -14,9 +17,9 @@
 //
 // Must run inside a binary that has the scopecache caddymodule
 // configured in the Caddyfile (so Provision() ran and registered
-// the gateway). Plain `frankenphp php-cli test.php` will show "no
-// gateway" results because no caddymodule is active — the extension's
-// LookupGateway returns nil. To exercise the actual round-trip:
+// the gateway). Plain `frankenphp php-cli test.php` will show NULL
+// because no caddymodule is active — the extension's LookupGateway
+// returns nil. To exercise the actual round-trip:
 //
 //   ./dist/frankenphp run --config Caddyfile.bench
 //   curl http://localhost:8080/test.php
@@ -46,21 +49,22 @@ unset($ch);
 $seed_note = ($seed_status == 409) ? " (already existed, OK)" : "";
 echo "Seed POST /append          -> HTTP $seed_status$seed_note\n\n";
 
-// Step 2: hit — pre-seeded item, returns the /get envelope.
-$got = scopecache_get('demo', 'hello');
+// Step 2: hit — pre-seeded item. Returns the /get envelope as a JSON
+// string. json_decode is the canonical PHP-side conversion.
+$got_raw = scopecache_get('demo', 'hello');
 echo "scopecache_get('demo', 'hello') -> ";
-var_dump($got);
+var_dump(json_decode($got_raw, true));
 
 // Step 3: miss — unknown id within a known scope. hit=false envelope.
-$miss = scopecache_get('demo', 'no-such-item');
+$miss_raw = scopecache_get('demo', 'no-such-item');
 echo "scopecache_get('demo', 'no-such-item') -> ";
-var_dump($miss);
+var_dump(json_decode($miss_raw, true));
 
 // Step 4: miss — unknown scope entirely. Same shape; cache treats
 // unknown scope identically to unknown id.
-$miss_scope = scopecache_get('no-such-scope', 'hello');
+$miss_scope_raw = scopecache_get('no-such-scope', 'hello');
 echo "scopecache_get('no-such-scope', 'hello') -> ";
-var_dump($miss_scope);
+var_dump(json_decode($miss_scope_raw, true));
 
 echo "\n=== scopecache_append envelope ===\n\n";
 
@@ -69,42 +73,54 @@ echo "\n=== scopecache_append envelope ===\n\n";
 // we don't collide with prior seeds.
 $append_id = 'php-write-' . bin2hex(random_bytes(4));
 $append_payload = json_encode(['written' => 'from PHP via scopecache_append']);
-$append_env = scopecache_append('demo', $append_id, $append_payload);
+$append_env_raw = scopecache_append('demo', $append_id, $append_payload);
 echo "scopecache_append('demo', '$append_id', ...) -> ";
-var_dump($append_env);
+var_dump(json_decode($append_env_raw, true));
 
 // Read back what we just wrote.
-$readback = scopecache_get('demo', $append_id);
+$readback_raw = scopecache_get('demo', $append_id);
 echo "scopecache_get('demo', '$append_id') -> ";
-var_dump($readback);
+var_dump(json_decode($readback_raw, true));
 
 // Append into a never-seen scope creates it implicitly (scopecache
 // has no separate scope-create primitive).
 $bootstrap_id = 'bootstrap-' . bin2hex(random_bytes(4));
-$bootstrap_env = scopecache_append('php-side-scope', $bootstrap_id, '"hi"');
+$bootstrap_env_raw = scopecache_append('php-side-scope', $bootstrap_id, '"hi"');
 echo "scopecache_append('php-side-scope', '$bootstrap_id', '\"hi\"') -> ";
-var_dump($bootstrap_env);
+var_dump(json_decode($bootstrap_env_raw, true));
 
 echo "\n=== scopecache_tail envelope ===\n\n";
 
 // Hit: tail returns /tail envelope with items[]. The seeded 'demo'
 // scope should have at least the seed plus the two appends above.
-$tail_hit = scopecache_tail('demo', 5);
+$tail_hit_raw = scopecache_tail('demo', 5);
 echo "scopecache_tail('demo', 5) -> ";
-var_dump($tail_hit);
+var_dump(json_decode($tail_hit_raw, true));
 
 // Miss: tail on unknown scope returns the same shape with hit=false,
-// items=[]. (Diverges from the pre-rewrite contract that returned
-// PHP null on miss; matches HTTP /tail exactly.)
-$tail_miss = scopecache_tail('no-such-scope', 5);
+// items=[].
+$tail_miss_raw = scopecache_tail('no-such-scope', 5);
 echo "scopecache_tail('no-such-scope', 5) -> ";
-var_dump($tail_miss);
+var_dump(json_decode($tail_miss_raw, true));
+
+echo "\n=== scopecache_get_payload (no envelope) ===\n\n";
+
+// Payload-only read — the lowest-overhead path: skip envelope build
+// entirely, return raw payload bytes. Equivalent to GET /render.
+$payload_raw = scopecache_get_payload('demo', 'hello');
+echo "scopecache_get_payload('demo', 'hello') -> ";
+var_dump($payload_raw);
 
 echo "\n";
-echo "Every line above shows an associative array with an 'ok' key.\n";
-echo "'hit'/'created' tell you the call outcome; 'item' or 'items'\n";
-echo "carries the data. Payloads are already decoded — no json_decode\n";
-echo "needed on the PHP side.\n";
+echo "Every line above shows the JSON envelope decoded into a PHP\n";
+echo "associative array via json_decode. The raw return from each\n";
+echo "scopecache_* function is a STRING — byte-identical to the\n";
+echo "matching HTTP endpoint response. Use json_decode when you need\n";
+echo "the array shape; pass the string straight through when you are\n";
+echo "forwarding to another HTTP layer or storing it as-is.\n";
+echo "\n";
+echo "scopecache_get_payload skips the envelope entirely and returns\n";
+echo "just the raw payload bytes — the cheapest single-item read.\n";
 echo "\n";
 echo "If all lines show NULL: no caddymodule was loaded. Check that\n";
 echo "your Caddyfile has a `scopecache { ... }` block and that the\n";

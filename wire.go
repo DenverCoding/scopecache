@@ -184,6 +184,19 @@ func AppendScopeListResponseJSON(buf []byte, entries []ScopeListEntry, truncated
 	return append(buf, '}', '\n')
 }
 
+// MarshalEnvelope is the public wrapper around scopecache's chosen
+// JSON encoder. Use it from add-ons / extensions to marshal one of
+// the *Response types from response_types.go into the wire format.
+// Internally this routes through goccy/go-json so the bytes match
+// what writeJSONResponse on the HTTP side would emit.
+//
+// Reads (Get/Head/Tail/ScopeList) have dedicated AppendNNResponseJSON
+// builders that are faster and emit approx_response_mb; use those
+// instead of MarshalEnvelope for those four response types.
+func MarshalEnvelope(v any) ([]byte, error) {
+	return jsonMarshal(v)
+}
+
 // --- WriteAck public alias ------------------------------------------
 
 // WriteAck is the public alias for the per-item write-acknowledgement
