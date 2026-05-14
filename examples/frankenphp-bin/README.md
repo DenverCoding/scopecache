@@ -1,6 +1,6 @@
-# FrankenPHP + scopecache — standalone binary
+# FrankenPHP + scopecache — standalone binary demo
 
-One static Linux binary, ~33 MB. Bundles Caddy + FrankenPHP (PHP 8 ZTS)
+One static Linux binary, ~33 MB. Bundles Caddy + FrankenPHP (PHP 8)
 + scopecache + addons in a single x86_64 Linux ELF. No package installs,
 no Docker required on the target, no shared libraries.
 
@@ -18,14 +18,18 @@ to scope `demo` via PHP→cgo and shows the last 5 items.
 ## Quick start on Windows / macOS via Docker
 
 ```bash
+curl -LO https://github.com/VeloxCoding/scopecache/raw/main/examples/frankenphp-bin/frankenphp-static-linux-x86_64
+
 docker run -d --name fpbin -p 8080:8080 \
     -v "$(pwd):/app:ro" \
     --entrypoint /app/frankenphp-static-linux-x86_64 \
     alpine:latest php-server
 ```
 
-On Git-Bash for Windows prefix with `MSYS_NO_PATHCONV=1`. Stop with
-`docker rm -f fpbin`.
+`curl` ships with modern Windows (10+) and macOS by default; wget
+does not. On Git-Bash for Windows prefix the `docker run` with
+`MSYS_NO_PATHCONV=1` so the `/app` path is not rewritten to a
+Windows path. Stop with `docker rm -f fpbin`.
 
 ## What you'll see
 
