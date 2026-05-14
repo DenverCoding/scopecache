@@ -357,12 +357,12 @@ func (i Item) MarshalJSON() ([]byte, error) {
 	}
 	buf := make([]byte, 0, 128)
 	buf = append(buf, `{"scope":`...)
-	buf = appendJSONString(buf, i.Scope)
+	buf = AppendJSONString(buf, i.Scope)
 	buf = append(buf, `,"id":`...)
 	if i.ID == "" {
 		buf = append(buf, `null`...)
 	} else {
-		buf = appendJSONString(buf, i.ID)
+		buf = AppendJSONString(buf, i.ID)
 	}
 	buf = append(buf, `,"seq":`...)
 	buf = strconv.AppendUint(buf, i.Seq, 10)

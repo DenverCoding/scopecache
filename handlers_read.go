@@ -161,7 +161,7 @@ func (api *API) writeItemsResponse(
 		if i > 0 {
 			buf = append(buf, ',')
 		}
-		buf = appendItemJSON(buf, items[i])
+		buf = AppendItemJSON(buf, items[i])
 	}
 	buf = append(buf, ']')
 
@@ -186,43 +186,8 @@ func (api *API) writeItemsResponse(
 	_, _ = w.Write(buf)
 }
 
-// appendItemJSON appends item to buf as JSON, mirroring
-// Item.MarshalJSON byte-for-byte: every item carries the full
-// scope/id/seq/ts + payload-bearing key set. An item without a
-// client-supplied id renders as `"id":null` rather than dropping
-// the key — uniform-shape rule lets clients read item.id directly
-// without a presence check. Items in the reserved _events scope
-// rename "payload" to "event". Empty Payload (only reachable via
-// white-box mutation; validatePayload blocks it on the write path)
-// emits literal "null" instead of malformed `,"payload":}`.
-func appendItemJSON(buf []byte, item Item) []byte {
-	payloadKey := "payload"
-	if item.Scope == EventsScopeName {
-		payloadKey = "event"
-	}
-
-	buf = append(buf, `{"scope":`...)
-	buf = appendJSONString(buf, item.Scope)
-	buf = append(buf, `,"id":`...)
-	if item.ID == "" {
-		buf = append(buf, `null`...)
-	} else {
-		buf = appendJSONString(buf, item.ID)
-	}
-	buf = append(buf, `,"seq":`...)
-	buf = strconv.AppendUint(buf, item.Seq, 10)
-	buf = append(buf, `,"ts":`...)
-	buf = strconv.AppendInt(buf, item.Ts, 10)
-	buf = append(buf, ',', '"')
-	buf = append(buf, payloadKey...)
-	buf = append(buf, '"', ':')
-	if len(item.Payload) == 0 {
-		buf = append(buf, `null`...)
-	} else {
-		buf = append(buf, item.Payload...)
-	}
-	return append(buf, '}')
-}
+// (appendItemJSON moved to wire.go as the public AppendItemJSON;
+// in-package callers go through that name.)
 
 func (api *API) handleHead(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -375,12 +340,12 @@ func writeGetResponse(w http.ResponseWriter, resp GetResponse) {
 		}
 
 		prefix = append(prefix, `{"ok":true,"hit":true,"count":1,"item":{"scope":`...)
-		prefix = appendJSONString(prefix, item.Scope)
+		prefix = AppendJSONString(prefix, item.Scope)
 		prefix = append(prefix, `,"id":`...)
 		if item.ID == "" {
 			prefix = append(prefix, `null`...)
 		} else {
-			prefix = appendJSONString(prefix, item.ID)
+			prefix = AppendJSONString(prefix, item.ID)
 		}
 		prefix = append(prefix, `,"seq":`...)
 		prefix = strconv.AppendUint(prefix, item.Seq, 10)
@@ -422,31 +387,7 @@ func writeGetResponse(w http.ResponseWriter, resp GetResponse) {
 	_, _ = w.Write(suffix)
 }
 
-// appendJSONString appends s to dst as a JSON-encoded string
-// ("..."). Fast path for the common case where s contains no
-// JSON-special bytes — single linear scan plus an inline copy
-// with quote-wrap, no allocation. Slow path falls through to
-// encoding/json so escape semantics (HTML-safe < style for
-// <, >, &; control-char escaping; UTF-8 invalid-byte handling)
-// stay byte-for-byte identical to the previous json.Marshal call.
-//
-// Specials list mirrors json.Encoder's default-on HTML-escape
-// table; the validator already rejects control chars in scope/id
-// so they only show up in pathological items injected via
-// white-box tests, but the slow-path fallback is correct for
-// them too.
-func appendJSONString(dst []byte, s string) []byte {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < 0x20 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' {
-			b, _ := jsonMarshal(s)
-			return append(dst, b...)
-		}
-	}
-	dst = append(dst, '"')
-	dst = append(dst, s...)
-	return append(dst, '"')
-}
+// (appendJSONString moved to wire.go as the public AppendJSONString.)
 
 // handleRender serves a single item as raw payload bytes with no JSON
 // envelope. The use case is serving cached HTML/XML/JSON/text fragments

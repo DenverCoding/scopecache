@@ -180,7 +180,7 @@ func (api *API) writeScopeListResponse(w http.ResponseWriter, resp ScopeListResp
 // like MB.MarshalJSON does.
 func appendScopeListEntryJSON(buf []byte, e scopeListEntry) []byte {
 	buf = append(buf, `{"scope":`...)
-	buf = appendJSONString(buf, e.Scope)
+	buf = AppendJSONString(buf, e.Scope)
 	buf = append(buf, `,"item_count":`...)
 	buf = strconv.AppendInt(buf, int64(e.ItemCount), 10)
 	buf = append(buf, `,"last_seq":`...)
