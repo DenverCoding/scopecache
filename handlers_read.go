@@ -18,7 +18,56 @@ package scopecache
 import (
 	"net/http"
 	"strconv"
+	"sync"
 )
+
+// responseBufferPool recycles the byte slices writeItemsResponse and
+// writeGetResponse use to build envelope bytes. Without it, every
+// large /tail / /head / /scopelist / /get response allocates ~500 KB
+// of fresh heap per request — at 6k qps that's 3 GB/s of allocation
+// pressure which Go's GC spends 10-30% of a core servicing.
+//
+// Pool semantics:
+//
+//   - New() returns a small (4 KiB) starter so cold-paths and small
+//     responses don't waste memory.
+//   - Callers Get the *[]byte, slice it to length 0 keeping cap,
+//     append into it, write it, then Put back IF the final cap is
+//     still under the maxPooledResponseBytes threshold. Above that
+//     we drop it on the floor — pooling multi-MiB buffers would
+//     pin memory needlessly.
+//   - Storing *[]byte (not []byte directly) avoids an interface-
+//     box allocation on every Put. Standard Go-pool pattern.
+const maxPooledResponseBytes = 1 << 20 // 1 MiB
+
+var responseBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
+}
+
+// getResponseBuf returns a byte slice with length 0 and cap at least
+// estCapacity. Either reuses a pooled buffer (if big enough) or
+// allocates fresh. Pair with putResponseBuf.
+func getResponseBuf(estCapacity int) (*[]byte, []byte) {
+	bufPtr := responseBufferPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	if cap(buf) < estCapacity {
+		buf = make([]byte, 0, estCapacity)
+	}
+	return bufPtr, buf
+}
+
+// putResponseBuf returns the buffer to the pool unless it grew
+// beyond the pooling threshold.
+func putResponseBuf(bufPtr *[]byte, buf []byte) {
+	if cap(buf) > maxPooledResponseBytes {
+		return
+	}
+	*bufPtr = buf
+	responseBufferPool.Put(bufPtr)
+}
 
 // writeHeadResponse / writeTailResponse are the typed-struct entry
 // points for the list-returning read endpoints. They call the shared
@@ -76,11 +125,12 @@ func (api *API) writeItemsResponse(
 	// Pre-grow buf so the per-item appends don't trigger slice
 	// re-grows on the hot path. The 32-byte per-item slack covers
 	// the JSON skeleton plus seq/ts digits.
-	estCapacity := int64(192) + int64(len(items))*32
+	estCapacity := 192 + len(items)*32
 	for i := range items {
-		estCapacity += int64(len(items[i].Scope)) + int64(len(items[i].ID)) + int64(len(items[i].Payload))
+		estCapacity += len(items[i].Scope) + len(items[i].ID) + len(items[i].Payload)
 	}
-	buf := make([]byte, 0, estCapacity)
+	bufPtr, buf := getResponseBuf(estCapacity)
+	defer func() { putResponseBuf(bufPtr, buf) }()
 
 	// Envelope head: ok, hit, count
 	buf = append(buf, `{"ok":true,"hit":`...)

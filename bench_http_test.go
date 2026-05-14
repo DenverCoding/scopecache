@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -267,6 +268,26 @@ func BenchmarkHTTP_RenderByID_Parallel(b *testing.B) {
 	})
 }
 
+// BenchmarkHTTP_Tail_5k mirrors scripts/bench.sh's tail-5k mode:
+// 100-item scope, 5 KiB payloads, /tail?limit=100. Each response is
+// ~500 KiB of marshalled JSON. The dominant cost here is NOT the
+// JSON build (already hand-rolled via appendItemJSON) but the
+// 503-KiB heap allocation per request from writeItemsResponse's
+// pre-grow buf. This bench surfaces that cost so the sync.Pool
+// fix (or any alternative) can be measured against a baseline.
+func BenchmarkHTTP_Tail_5k(b *testing.B) {
+	client, scopes, _, cleanup := benchHTTPServer(b, 1, 100, 5*1024)
+	defer cleanup()
+	scope := scopes[0]
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		doGET(b, client, "http://sock/tail?scope="+scope+"&limit=100")
+	}
+}
+
 // BenchmarkHTTP_Head10 models the "load the last 10 messages in this thread"
 // pattern — a small batch read rather than a single item. Uses limit=10.
 func BenchmarkHTTP_Head10(b *testing.B) {
@@ -317,6 +338,51 @@ func BenchmarkHTTP_Append(b *testing.B) {
 		_ = resp.Body.Close()
 		if resp.StatusCode/100 != 2 {
 			b.Fatalf("POST /append: status %d", resp.StatusCode)
+		}
+	}
+}
+
+// BenchmarkHTTP_Warm_* posts a {"items":[...]} body of N entries
+// to /warm, end-to-end via the live caddyscope-shaped HTTP path.
+// The body is built once and posted b.N times; each iteration goes
+// through MaxBytesReader, the JSON decoder (json.go -> goccy on
+// main, encoding/json on earlier versions), and the store's
+// replaceScopes path. SetBytes reports throughput in MB/s.
+//
+// Items spread across 50 scopes so the lock contention pattern is
+// realistic — a single-scope warm at 10k items would serialize on
+// one buf.mu and not exercise the multi-scope reservation logic.
+
+func BenchmarkHTTP_Warm_1000(b *testing.B)  { benchHTTPWarm(b, 1000) }
+func BenchmarkHTTP_Warm_10000(b *testing.B) { benchHTTPWarm(b, 10000) }
+
+func benchHTTPWarm(b *testing.B, n int) {
+	client, _, _, cleanup := benchHTTPServer(b, 1, 1, 8) // tiny seed; we replace
+	defer cleanup()
+
+	items := make([]map[string]any, n)
+	for i := 0; i < n; i++ {
+		items[i] = map[string]any{
+			"scope":   fmt.Sprintf("warm-%d", i%50),
+			"id":      fmt.Sprintf("item-%d", i),
+			"payload": json.RawMessage(fmt.Sprintf(`{"idx":%d,"data":"row-%d"}`, i, i)),
+		}
+	}
+	body, _ := json.Marshal(map[string]any{"items": items})
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		resp, err := client.Post("http://sock/warm", "application/json", bytes.NewReader(body))
+		if err != nil {
+			b.Fatalf("POST /warm: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode/100 != 2 {
+			b.Fatalf("POST /warm: status %d", resp.StatusCode)
 		}
 	}
 }
