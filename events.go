@@ -102,7 +102,7 @@ func (s *store) emitEvent(evt writeEvent) {
 		// inline twice (in the user scope and in `_events`).
 		evt.Payload = nil
 	}
-	body, err := json.Marshal(evt)
+	body, err := jsonMarshal(evt)
 	if err != nil {
 		// json.Marshal on a writeEvent whose fields are all stdlib
 		// types should never fail in practice — defensive only.

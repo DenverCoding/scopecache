@@ -21,7 +21,6 @@
 package scopecache
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -95,7 +94,7 @@ func writeMutationError(w http.ResponseWriter, err error, scopeForSFE string) {
 // json.Decoder would otherwise silently ignore.
 func decodeBody(w http.ResponseWriter, r *http.Request, max int64, out interface{}) error {
 	r.Body = http.MaxBytesReader(w, r.Body, max)
-	dec := json.NewDecoder(r.Body)
+	dec := jsonNewDecoder(r.Body)
 	if err := dec.Decode(out); err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
@@ -128,7 +127,7 @@ func decodeBody(w http.ResponseWriter, r *http.Request, max int64, out interface
 // own, but harmless to defend against) we emit a minimal valid
 // JSON 500 so the connection still returns parseable bytes.
 func writeJSONResponse(w http.ResponseWriter, code int, resp any) {
-	body, err := json.Marshal(resp)
+	body, err := jsonMarshal(resp)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusInternalServerError)

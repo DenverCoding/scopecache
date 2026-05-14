@@ -3,6 +3,8 @@ package scopecache
 import (
 	"encoding/json"
 	"testing"
+
+	gojson "github.com/goccy/go-json"
 )
 
 // bench_marshal_test.go — micro-benchmarks for the response-envelope
@@ -216,6 +218,67 @@ func BenchmarkMarshal_writeEvent_notify(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = json.Marshal(evt)
+	}
+}
+
+// --- stdlib vs goccy comparison on the hot types -------------------
+// These mirror the benches above but use gojson.Marshal directly so
+// the per-call cost via the production helper (jsonMarshal in
+// json.go) is visible. Subtract the matching stdlib row above to
+// see the savings goccy buys on each response type.
+
+func BenchmarkMarshalGoccy_AppendResponse(b *testing.B) {
+	id := "alice"
+	resp := AppendResponse{
+		OK: true, Created: true,
+		Item: writeAck{Scope: "users", ID: &id, Seq: 42, Ts: 1715600000123456},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = gojson.Marshal(resp)
+	}
+}
+
+func BenchmarkMarshalGoccy_writeEvent_append(b *testing.B) {
+	evt := writeEvent{
+		Op: "append", Scope: "users", ID: "alice",
+		Seq: 42, Ts: 1715600000123456,
+		Payload: json.RawMessage(`{"name":"Alice"}`),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = gojson.Marshal(evt)
+	}
+}
+
+func BenchmarkMarshalGoccy_StatsResponse(b *testing.B) {
+	resp := StatsResponse{
+		OK:               true,
+		Scopes:           4,
+		Items:            12,
+		ApproxStoreMB:    MB(3564),
+		LastWriteTS:      1715600000999000,
+		EventsDropsTotal: 0,
+		ReservedScopes: []reservedScopeEntry{
+			{Scope: "_events", ItemCount: 12},
+			{Scope: "_inbox", ItemCount: 0},
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = gojson.Marshal(resp)
+	}
+}
+
+func BenchmarkMarshalGoccy_DeleteResponse(b *testing.B) {
+	resp := DeleteResponse{OK: true, Hit: true, Count: 1}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = gojson.Marshal(resp)
 	}
 }
 
