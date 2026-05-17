@@ -181,6 +181,9 @@ func (api *API) writeItemsResponse(
 		return
 	}
 
+	if len(items) == 0 {
+		w.Header().Set(MissHeader, "true")
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf)
@@ -370,6 +373,9 @@ func writeGetResponse(w http.ResponseWriter, resp GetResponse) {
 	suffix = strconv.AppendFloat(suffix, mbVal, 'f', 4, 64)
 	suffix = append(suffix, '}', '\n')
 
+	if !resp.Hit {
+		w.Header().Set(MissHeader, "true")
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(prefix)
@@ -418,6 +424,7 @@ func (api *API) handleRender(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeMiss := func() {
+		w.Header().Set(MissHeader, "true")
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusNotFound)
 	}

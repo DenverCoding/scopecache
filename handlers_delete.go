@@ -45,6 +45,9 @@ func (api *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if deleted == 0 {
+		w.Header().Set(MissHeader, "true")
+	}
 	writeJSONResponse(w, http.StatusOK, DeleteResponse{
 		OK:    true,
 		Hit:   deleted > 0,

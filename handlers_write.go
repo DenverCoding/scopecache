@@ -189,6 +189,9 @@ func (api *API) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if updated == 0 {
+		w.Header().Set(MissHeader, "true")
+	}
 	writeJSONResponse(w, http.StatusOK, UpdateResponse{
 		OK:      true,
 		Created: false,
