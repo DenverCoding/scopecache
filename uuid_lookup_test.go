@@ -84,11 +84,11 @@ func TestGateway_GetAndRenderByUUID(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 	u := committed.UUID
-	if !isValidUUIDv7(u) {
-		t.Fatalf("Append returned no uuid: %q", u)
+	if u.IsZero() {
+		t.Fatalf("Append returned no uuid: %q", u.String())
 	}
 
-	item, hit := g.GetByUUID("s", u)
+	item, hit := g.GetByUUID("s", u.String())
 	if !hit {
 		t.Fatal("GetByUUID miss")
 	}
@@ -96,7 +96,7 @@ func TestGateway_GetAndRenderByUUID(t *testing.T) {
 		t.Fatalf("GetByUUID wrong item: id=%q want a", item.ID)
 	}
 
-	body, hit := g.RenderByUUID("s", u)
+	body, hit := g.RenderByUUID("s", u.String())
 	if !hit {
 		t.Fatal("RenderByUUID miss")
 	}

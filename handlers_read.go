@@ -363,7 +363,7 @@ func writeGetResponse(w http.ResponseWriter, resp GetResponse) {
 		prefix = append(prefix, ',', '"')
 		prefix = append(prefix, uuidKey...)
 		prefix = append(prefix, '"', ':')
-		prefix = AppendJSONString(prefix, item.UUID)
+		prefix = appendUUIDJSON(prefix, item.UUID)
 		prefix = append(prefix, ',', '"')
 		prefix = append(prefix, payloadKey...)
 		prefix = append(prefix, '"', ':')

@@ -294,14 +294,15 @@ func (m MB) MarshalJSON() ([]byte, error) {
 // UUID is a cache-minted UUIDv7 — the stable identity that links the
 // item to its source-of-truth row and survives wipe/rebuild. Cache-
 // owned like Ts: clients must not supply it on a create/replace write
-// (400). Minting + the strict-v7 parser live in uuid.go; the byUUID
-// index lives in buffer.go.
+// (400). Held as raw 16 bytes (see the UUID type in uuid.go), rendered
+// as the canonical 36-char string on the wire; the byUUID index lives
+// in buffer.go.
 type Item struct {
 	Scope   string          `json:"scope,omitempty"`
 	ID      string          `json:"id,omitempty"`
 	Seq     uint64          `json:"seq,omitempty"`
 	Ts      int64           `json:"ts"`
-	UUID    string          `json:"uuid"`
+	UUID    UUID            `json:"uuid"`
 	Payload json.RawMessage `json:"payload"` // see MarshalJSON: serialised as `event` for _events items
 
 	// renderBytes is the JSON-string-decoded form of Payload, set at
@@ -385,7 +386,7 @@ func (i Item) MarshalJSON() ([]byte, error) {
 	buf = append(buf, `,"ts":`...)
 	buf = strconv.AppendInt(buf, i.Ts, 10)
 	buf = append(buf, uuidKey...)
-	buf = AppendJSONString(buf, i.UUID)
+	buf = appendUUIDJSON(buf, i.UUID)
 	buf = append(buf, ',')
 	buf = append(buf, payloadKey...)
 	if len(i.Payload) == 0 {
@@ -555,7 +556,14 @@ func approxItemSize(item Item) int64 {
 	n += 32
 	n += int64(len(item.Scope))
 	n += int64(len(item.ID))
-	n += int64(len(item.UUID))
+	if !item.UUID.IsZero() {
+		// The uuid is 16 bytes in memory; charge the canonical 36-char
+		// string width instead — a conservative over-estimate that
+		// keeps the cap accounting stable across the string-vs-bytes
+		// representation and matches the validators' pre-mint
+		// checkItemSize correction.
+		n += uuidStringLen
+	}
 	n += 8 // Seq
 	n += 8 // Ts (always set, plain int64)
 	if item.counter != nil {

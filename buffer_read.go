@@ -150,10 +150,10 @@ func (b *scopeBuffer) getBySeq(seq uint64) (Item, bool) {
 	return materialiseCounter(*item), true
 }
 
-func (b *scopeBuffer) getByUUID(uuid string) (Item, bool) {
+func (b *scopeBuffer) getByUUID(u UUID) (Item, bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	item, ok := b.byUUID[uuid]
+	item, ok := b.byUUID[u]
 	if !ok {
 		return Item{}, false
 	}

@@ -28,9 +28,20 @@ func checkUUIDv7Shape(t *testing.T, s string) {
 	}
 }
 
+// mustUUID parses s as a canonical UUIDv7 or fails the test. Test
+// fixtures that need an Item-ready UUID value go through here.
+func mustUUID(t *testing.T, s string) UUID {
+	t.Helper()
+	u, err := parseUUIDv7(s)
+	if err != nil {
+		t.Fatalf("mustUUID(%q): %v", s, err)
+	}
+	return u
+}
+
 func TestUUIDv7_Format(t *testing.T) {
 	for i := 0; i < 1000; i++ {
-		checkUUIDv7Shape(t, newUUIDv7())
+		checkUUIDv7Shape(t, newUUIDv7().String())
 	}
 }
 
@@ -40,11 +51,11 @@ func TestUUIDv7_Format(t *testing.T) {
 // batch and finding every value distinct exercises that.
 func TestUUIDv7_Unique(t *testing.T) {
 	const n = 500000
-	seen := make(map[string]struct{}, n)
+	seen := make(map[UUID]struct{}, n)
 	for i := 0; i < n; i++ {
 		u := newUUIDv7()
 		if _, dup := seen[u]; dup {
-			t.Fatalf("duplicate uuid minted at #%d: %q", i, u)
+			t.Fatalf("duplicate uuid minted at #%d: %q", i, u.String())
 		}
 		seen[u] = struct{}{}
 	}
@@ -55,12 +66,12 @@ func TestUUIDv7_UniqueConcurrent(t *testing.T) {
 	const perG = 4000
 
 	var wg sync.WaitGroup
-	chunks := make([][]string, goroutines)
+	chunks := make([][]UUID, goroutines)
 	for gi := 0; gi < goroutines; gi++ {
 		wg.Add(1)
 		go func(gi int) {
 			defer wg.Done()
-			out := make([]string, 0, perG)
+			out := make([]UUID, 0, perG)
 			for i := 0; i < perG; i++ {
 				out = append(out, newUUIDv7())
 			}
@@ -69,11 +80,11 @@ func TestUUIDv7_UniqueConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	seen := make(map[string]struct{}, goroutines*perG)
+	seen := make(map[UUID]struct{}, goroutines*perG)
 	for _, c := range chunks {
 		for _, u := range c {
 			if _, dup := seen[u]; dup {
-				t.Fatalf("duplicate uuid minted across goroutines: %q", u)
+				t.Fatalf("duplicate uuid minted across goroutines: %q", u.String())
 			}
 			seen[u] = struct{}{}
 		}
@@ -83,18 +94,18 @@ func TestUUIDv7_UniqueConcurrent(t *testing.T) {
 func TestUUIDv7_RoundTrip(t *testing.T) {
 	for i := 0; i < 5000; i++ {
 		u := newUUIDv7()
-		b, err := parseUUIDv7(u)
+		parsed, err := parseUUIDv7(u.String())
 		if err != nil {
-			t.Fatalf("parseUUIDv7(%q): %v", u, err)
+			t.Fatalf("parseUUIDv7(%q): %v", u.String(), err)
 		}
-		if formatUUID(b) != u {
-			t.Fatalf("round-trip mismatch: %q -> bytes -> %q", u, formatUUID(b))
+		if parsed != u {
+			t.Fatalf("round-trip mismatch: %q -> bytes -> %q", u.String(), parsed.String())
 		}
 	}
 }
 
 func TestFormatUUID(t *testing.T) {
-	b := [16]byte{0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0x7c, 0xde,
+	b := UUID{0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0x7c, 0xde,
 		0x8f, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd}
 	got := formatUUID(b)
 	want := "01234567-89ab-7cde-8f01-23456789abcd"
@@ -134,7 +145,7 @@ func BenchmarkNewUUIDv7(b *testing.B) {
 }
 
 func BenchmarkFormatUUID(b *testing.B) {
-	v := [16]byte{0x01, 0x92, 0xf3, 0xa0, 0x6e, 0x1c, 0x7c, 0x8a,
+	v := UUID{0x01, 0x92, 0xf3, 0xa0, 0x6e, 0x1c, 0x7c, 0x8a,
 		0xb3, 0xd4, 0x1f, 0x2e, 0x3a, 0x4b, 0x5c, 0x6d}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

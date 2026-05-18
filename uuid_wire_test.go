@@ -48,7 +48,8 @@ func TestUpdate_RejectsClientSuppliedUUID(t *testing.T) {
 // --- uuid key is present on every serialised item ----------------------------
 
 func TestItem_MarshalJSONIncludesUUIDKey(t *testing.T) {
-	b, err := Item{Scope: "s", ID: "a", Seq: 1, Ts: 42, UUID: sampleUUIDv7,
+	u := mustUUID(t, sampleUUIDv7)
+	b, err := Item{Scope: "s", ID: "a", Seq: 1, Ts: 42, UUID: u,
 		Payload: []byte(`{"v":1}`)}.MarshalJSON()
 	if err != nil {
 		t.Fatalf("MarshalJSON: %v", err)
@@ -58,7 +59,7 @@ func TestItem_MarshalJSONIncludesUUIDKey(t *testing.T) {
 	}
 	// AppendItemJSON must stay byte-identical.
 	if got := string(AppendItemJSON(nil, Item{Scope: "s", ID: "a", Seq: 1, Ts: 42,
-		UUID: sampleUUIDv7, Payload: []byte(`{"v":1}`)})); got != string(b) {
+		UUID: u, Payload: []byte(`{"v":1}`)})); got != string(b) {
 		t.Fatalf("AppendItemJSON != MarshalJSON:\n  %s\n  %s", got, b)
 	}
 }

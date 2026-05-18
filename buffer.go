@@ -78,15 +78,16 @@ type scopeBuffer struct {
 	bySeq map[uint64]*Item
 	// byUUID indexes items by their cache-minted UUIDv7. Lazy-allocated
 	// like byID/bySeq; populated only when the buffer is store-attached
-	// (orphan test buffers have no generator, so their items have no
-	// uuid and no byUUID entry).
-	byUUID  map[string]*Item
+	// (orphan test buffers mint no uuid, so their items have a zero
+	// UUID and no byUUID entry). The key is the raw 16-byte UUID — no
+	// per-entry string allocation.
+	byUUID  map[UUID]*Item
 	lastSeq uint64
 	// firstUUID / lastUUID hold the UUIDv7 of the oldest and newest
 	// item ever inserted into this scope. Set on insert, NEVER reset on
 	// delete (like lastSeq) so /scopelist can report the scope's span.
-	firstUUID string
-	lastUUID  string
+	firstUUID UUID
+	lastUUID  UUID
 	// maxItems caps the number of items this scope may hold; writes
 	// past it produce *ScopeFullError. The unboundedScopeMaxItems
 	// sentinel (= 0) means "no count cap" — the write paths skip the

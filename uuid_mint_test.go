@@ -100,22 +100,22 @@ func TestScopeBuffer_FirstLastUUIDAndIndex(t *testing.T) {
 	s := newStore(Config{})
 	buf, _ := s.getOrCreateScope("s")
 
-	var uuids []string
+	var uuids []UUID
 	for i := 0; i < 3; i++ {
 		it, err := buf.appendItem(newItem("s", "", map[string]interface{}{"v": i}))
 		if err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
-		if !isValidUUIDv7(it.UUID) {
-			t.Fatalf("append %d minted invalid uuid %q", i, it.UUID)
+		if !it.UUID.isValidV7() {
+			t.Fatalf("append %d minted invalid uuid %q", i, it.UUID.String())
 		}
 		uuids = append(uuids, it.UUID)
 	}
 	if buf.firstUUID != uuids[0] {
-		t.Fatalf("firstUUID=%q want %q", buf.firstUUID, uuids[0])
+		t.Fatalf("firstUUID=%q want %q", buf.firstUUID.String(), uuids[0].String())
 	}
 	if buf.lastUUID != uuids[2] {
-		t.Fatalf("lastUUID=%q want %q", buf.lastUUID, uuids[2])
+		t.Fatalf("lastUUID=%q want %q", buf.lastUUID.String(), uuids[2].String())
 	}
 
 	// Delete the oldest item — firstUUID must NOT regress (it survives
@@ -124,12 +124,12 @@ func TestScopeBuffer_FirstLastUUIDAndIndex(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 	if buf.firstUUID != uuids[0] {
-		t.Fatalf("firstUUID changed after delete: %q want %q", buf.firstUUID, uuids[0])
+		t.Fatalf("firstUUID changed after delete: %q want %q", buf.firstUUID.String(), uuids[0].String())
 	}
 	if _, ok := buf.byUUID[uuids[0]]; ok {
-		t.Fatalf("byUUID still maps the deleted item's uuid %q", uuids[0])
+		t.Fatalf("byUUID still maps the deleted item's uuid %q", uuids[0].String())
 	}
 	if _, ok := buf.byUUID[uuids[2]]; !ok {
-		t.Fatalf("byUUID lost a live item's uuid %q", uuids[2])
+		t.Fatalf("byUUID lost a live item's uuid %q", uuids[2].String())
 	}
 }

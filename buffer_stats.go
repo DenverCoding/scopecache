@@ -65,8 +65,8 @@ func (b *scopeBuffer) approxSizeBytes() int64 {
 type scopeStats struct {
 	ItemCount      int
 	LastSeq        uint64
-	FirstUUID      string
-	LastUUID       string
+	FirstUUID      UUID
+	LastUUID       UUID
 	ApproxScopeMB  MB
 	CreatedTS      int64
 	LastWriteTS    int64

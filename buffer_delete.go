@@ -49,7 +49,7 @@ func (b *scopeBuffer) deleteIndexLocked(i int) {
 		delete(b.byID, removed.ID)
 		b.idKeyBytes -= int64(len(removed.ID))
 	}
-	if removed.UUID != "" {
+	if !removed.UUID.IsZero() {
 		delete(b.byUUID, removed.UUID)
 	}
 
@@ -102,7 +102,7 @@ func (b *scopeBuffer) shrinkIfSparseLocked() {
 	// empty IDs is cheaper than growing the map back up via appends.
 	newBySeq := make(map[uint64]*Item, len(newItems))
 	var newByID map[string]*Item
-	var newByUUID map[string]*Item
+	var newByUUID map[UUID]*Item
 	for i := range newItems {
 		newBySeq[newItems[i].Seq] = newItems[i]
 		if newItems[i].ID != "" {
@@ -111,9 +111,9 @@ func (b *scopeBuffer) shrinkIfSparseLocked() {
 			}
 			newByID[newItems[i].ID] = newItems[i]
 		}
-		if newItems[i].UUID != "" {
+		if !newItems[i].UUID.IsZero() {
 			if newByUUID == nil {
-				newByUUID = make(map[string]*Item, len(newItems))
+				newByUUID = make(map[UUID]*Item, len(newItems))
 			}
 			newByUUID[newItems[i].UUID] = newItems[i]
 		}
@@ -196,7 +196,7 @@ func (b *scopeBuffer) deleteBySeq(seq uint64) (int, error) {
 	return 1, nil
 }
 
-func (b *scopeBuffer) deleteByUUID(uuid string) (int, error) {
+func (b *scopeBuffer) deleteByUUID(u UUID) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -204,7 +204,7 @@ func (b *scopeBuffer) deleteByUUID(uuid string) (int, error) {
 		return 0, &ScopeDetachedError{}
 	}
 
-	existing, ok := b.byUUID[uuid]
+	existing, ok := b.byUUID[u]
 	if !ok {
 		return 0, nil
 	}
@@ -239,14 +239,14 @@ func (b *scopeBuffer) deleteUpToSeq(maxSeq uint64) (int, error) {
 // boundary item is the one carrying `uuid`. A uuid not present in the
 // scope means the boundary item is already gone — drains run
 // front-to-back, so everything before it is gone too: a no-op (0).
-func (b *scopeBuffer) deleteUpToUUID(uuid string) (int, error) {
+func (b *scopeBuffer) deleteUpToUUID(u UUID) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.detached {
 		return 0, &ScopeDetachedError{}
 	}
-	boundary, ok := b.byUUID[uuid]
+	boundary, ok := b.byUUID[u]
 	if !ok {
 		return 0, nil
 	}
@@ -275,7 +275,7 @@ func (b *scopeBuffer) deleteUpToSeqLocked(maxSeq uint64) int {
 			delete(b.byID, removed.ID)
 			freedIDKeyBytes += int64(len(removed.ID))
 		}
-		if removed.UUID != "" {
+		if !removed.UUID.IsZero() {
 			delete(b.byUUID, removed.UUID)
 		}
 	}

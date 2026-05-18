@@ -50,10 +50,10 @@ type scopeReplacement struct {
 	items      []*Item
 	byID       map[string]*Item
 	bySeq      map[uint64]*Item
-	byUUID     map[string]*Item
+	byUUID     map[UUID]*Item
 	lastSeq    uint64
-	firstUUID  string
-	lastUUID   string
+	firstUUID  UUID
+	lastUUID   UUID
 	idKeyBytes int64
 }
 
@@ -73,7 +73,7 @@ func buildReplacementState(items []Item, mintUUID bool) (scopeReplacement, error
 			items:  []*Item{},
 			byID:   make(map[string]*Item),
 			bySeq:  make(map[uint64]*Item),
-			byUUID: make(map[string]*Item),
+			byUUID: make(map[UUID]*Item),
 		}, nil
 	}
 
@@ -116,8 +116,8 @@ func buildReplacementState(items []Item, mintUUID bool) (scopeReplacement, error
 		// uuid: adopt the client-supplied value (validateWriteItem
 		// already verified v7 shape on the /warm//rebuild path) or
 		// mint a fresh one. !mintUUID (orphan test buffer) leaves it
-		// empty, consistent with insertNewItemLocked.
-		if item.UUID == "" && mintUUID {
+		// zero, consistent with insertNewItemLocked.
+		if item.UUID.IsZero() && mintUUID {
 			item.UUID = newUUIDv7()
 		}
 		// /warm and /rebuild's per-item validateWriteItem already filled
@@ -146,13 +146,13 @@ func buildReplacementState(items []Item, mintUUID bool) (scopeReplacement, error
 	// scope is a data error (the source supplied two rows with the
 	// same identity) — reject the whole batch, mirroring the byID
 	// duplicate check above.
-	byUUID := make(map[string]*Item, len(built))
+	byUUID := make(map[UUID]*Item, len(built))
 	for _, item := range built {
-		if item.UUID == "" {
+		if item.UUID.IsZero() {
 			continue
 		}
 		if _, dup := byUUID[item.UUID]; dup {
-			return scopeReplacement{}, errors.New("duplicate 'uuid' value within scope: '" + item.UUID + "'")
+			return scopeReplacement{}, errors.New("duplicate 'uuid' value within scope: '" + formatUUID(item.UUID) + "'")
 		}
 		byUUID[item.UUID] = item
 	}

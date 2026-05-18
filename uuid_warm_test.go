@@ -107,12 +107,12 @@ func TestWarm_SetsFirstLastUUIDAndIndex(t *testing.T) {
 	if !ok {
 		t.Fatal("scope missing after warm")
 	}
-	if !isValidUUIDv7(buf.firstUUID) || !isValidUUIDv7(buf.lastUUID) {
-		t.Fatalf("firstUUID/lastUUID not set: first=%q last=%q", buf.firstUUID, buf.lastUUID)
+	if buf.firstUUID.IsZero() || buf.lastUUID.IsZero() {
+		t.Fatalf("firstUUID/lastUUID not set: first=%q last=%q", buf.firstUUID.String(), buf.lastUUID.String())
 	}
 	if buf.firstUUID != buf.items[0].UUID || buf.lastUUID != buf.items[2].UUID {
 		t.Fatalf("uuid span mismatch: first=%q last=%q items=[%q..%q]",
-			buf.firstUUID, buf.lastUUID, buf.items[0].UUID, buf.items[2].UUID)
+			buf.firstUUID.String(), buf.lastUUID.String(), buf.items[0].UUID.String(), buf.items[2].UUID.String())
 	}
 	if len(buf.byUUID) != 3 {
 		t.Fatalf("byUUID has %d entries want 3", len(buf.byUUID))

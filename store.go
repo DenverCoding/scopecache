@@ -665,7 +665,7 @@ func (s *store) appendOneTrusted(item Item) (Item, error) {
 	// per append. The recursive emitAppendEvent → appendOneTrusted
 	// (_events) frame still notifies _events because _events IS
 	// reserved, so EventsModeFull drainers stay woken correctly.
-	s.emitAppendEvent(result.Scope, result.ID, result.Seq, result.Ts, result.UUID, result.Payload)
+	s.emitAppendEvent(result.Scope, result.ID, result.Seq, result.Ts, wireUUID(result.UUID), result.Payload)
 	if isReservedScope(result.Scope) {
 		s.notifySubscriber(result.Scope)
 	}
@@ -691,7 +691,7 @@ func (s *store) upsertOne(item Item) (Item, bool, error) {
 		}
 		return result, itemCreated, upsertErr
 	}
-	s.emitUpsertEvent(result.Scope, result.ID, result.Seq, result.Ts, result.UUID, result.Payload)
+	s.emitUpsertEvent(result.Scope, result.ID, result.Seq, result.Ts, wireUUID(result.UUID), result.Payload)
 	return result, itemCreated, nil
 }
 
@@ -761,7 +761,7 @@ func (s *store) updateOne(item Item) (int, error) {
 	switch {
 	case item.ID != "":
 		updated, err = buf.updateByID(item.ID, item.Payload, item.renderBytes)
-	case item.UUID != "":
+	case !item.UUID.IsZero():
 		updated, err = buf.updateByUUID(item.UUID, item.Payload, item.renderBytes)
 	default:
 		updated, err = buf.updateBySeq(item.Seq, item.Payload, item.renderBytes)
@@ -770,7 +770,7 @@ func (s *store) updateOne(item Item) (int, error) {
 		return updated, err
 	}
 	if updated > 0 {
-		s.emitUpdateEvent(item.Scope, item.ID, item.Seq, item.UUID, item.Payload)
+		s.emitUpdateEvent(item.Scope, item.ID, item.Seq, wireUUID(item.UUID), item.Payload)
 	}
 	return updated, nil
 }
@@ -798,7 +798,10 @@ func (s *store) deleteOne(scope, id string, seq uint64, uuid string) (int, error
 	case id != "":
 		deleted, err = buf.deleteByID(id)
 	case uuid != "":
-		deleted, err = buf.deleteByUUID(uuid)
+		// validateDeleteRequest already confirmed canonical v7 shape,
+		// so the parse cannot fail here.
+		u, _ := parseUUIDv7(uuid)
+		deleted, err = buf.deleteByUUID(u)
 	default:
 		deleted, err = buf.deleteBySeq(seq)
 	}
@@ -830,7 +833,10 @@ func (s *store) deleteUpTo(scope string, maxSeq uint64, uuid string) (int, error
 		err     error
 	)
 	if uuid != "" {
-		deleted, err = buf.deleteUpToUUID(uuid)
+		// validateDeleteUpToRequest already confirmed canonical v7
+		// shape, so the parse cannot fail here.
+		u, _ := parseUUIDv7(uuid)
+		deleted, err = buf.deleteUpToUUID(u)
 	} else {
 		deleted, err = buf.deleteUpToSeq(maxSeq)
 	}
@@ -891,7 +897,12 @@ func (s *store) get(scope, id string, seq uint64, uuid string) (Item, bool) {
 	case id != "":
 		item, found = buf.getByID(id)
 	case uuid != "":
-		item, found = buf.getByUUID(uuid)
+		// Reads are permissive: a malformed uuid (only reachable via a
+		// Gateway caller — the HTTP layer pre-validates in
+		// parseLookupTarget) leaves found false, a clean miss.
+		if u, perr := parseUUIDv7(uuid); perr == nil {
+			item, found = buf.getByUUID(u)
+		}
 	default:
 		item, found = buf.getBySeq(seq)
 	}
@@ -918,7 +929,12 @@ func (s *store) render(scope, id string, seq uint64, uuid string) ([]byte, bool)
 	case id != "":
 		item, found = buf.getByID(id)
 	case uuid != "":
-		item, found = buf.getByUUID(uuid)
+		// Reads are permissive: a malformed uuid (only reachable via a
+		// Gateway caller — the HTTP layer pre-validates in
+		// parseLookupTarget) leaves found false, a clean miss.
+		if u, perr := parseUUIDv7(uuid); perr == nil {
+			item, found = buf.getByUUID(u)
+		}
 	default:
 		item, found = buf.getBySeq(seq)
 	}
@@ -1173,8 +1189,8 @@ type scopeListEntry struct {
 	Scope          string `json:"scope"`
 	ItemCount      int    `json:"item_count"`
 	LastSeq        uint64 `json:"last_seq"`
-	FirstUUID      string `json:"first_uuid"`
-	LastUUID       string `json:"last_uuid"`
+	FirstUUID      UUID   `json:"first_uuid"`
+	LastUUID       UUID   `json:"last_uuid"`
 	ApproxScopeMB  MB     `json:"approx_scope_mb"`
 	CreatedTS      int64  `json:"created_ts"`
 	LastWriteTS    int64  `json:"last_write_ts"`

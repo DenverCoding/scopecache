@@ -47,7 +47,7 @@ func newWriteAck(item Item) writeAck {
 		id := item.ID
 		idPtr = &id
 	}
-	return writeAck{Scope: item.Scope, ID: idPtr, Seq: item.Seq, Ts: item.Ts, UUID: item.UUID}
+	return writeAck{Scope: item.Scope, ID: idPtr, Seq: item.Seq, Ts: item.Ts, UUID: wireUUID(item.UUID)}
 }
 
 func (api *API) handleAppend(w http.ResponseWriter, r *http.Request) {

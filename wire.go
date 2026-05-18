@@ -48,7 +48,7 @@ func AppendItemJSON(buf []byte, item Item) []byte {
 	buf = append(buf, ',', '"')
 	buf = append(buf, uuidKey...)
 	buf = append(buf, '"', ':')
-	buf = AppendJSONString(buf, item.UUID)
+	buf = appendUUIDJSON(buf, item.UUID)
 	buf = append(buf, ',', '"')
 	buf = append(buf, payloadKey...)
 	buf = append(buf, '"', ':')

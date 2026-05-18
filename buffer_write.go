@@ -240,7 +240,7 @@ func (b *scopeBuffer) updateBySeq(seq uint64, payload json.RawMessage, preRender
 // body carries no id (uuid is the address), so the validator's
 // checkItemSize undercounts by len(stored.ID) and the post-load
 // re-check below is required — see updateBySeq for the full rationale.
-func (b *scopeBuffer) updateByUUID(uuid string, payload json.RawMessage, preRender []byte) (int, error) {
+func (b *scopeBuffer) updateByUUID(u UUID, payload json.RawMessage, preRender []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -248,7 +248,7 @@ func (b *scopeBuffer) updateByUUID(uuid string, payload json.RawMessage, preRend
 		return 0, &ScopeDetachedError{}
 	}
 
-	existing, ok := b.byUUID[uuid]
+	existing, ok := b.byUUID[u]
 	if !ok {
 		return 0, nil
 	}
@@ -307,7 +307,7 @@ func (b *scopeBuffer) updateByUUID(uuid string, payload json.RawMessage, preRend
 // mintedUUID is the caller's pre-minted UUIDv7 (appendItem / upsertByID
 // call newUUIDv7 OUTSIDE b.mu so the mint cost stays off the scope's
 // contended critical section). It is adopted only when the buffer is
-// store-attached; an orphan store-less buffer leaves item.UUID empty.
+// store-attached; an orphan store-less buffer leaves item.UUID zero.
 //
 // nowUs is caller-supplied so /upsert keeps create- and replace-
 // paths on identical Ts (observers cannot infer create-vs-replace
@@ -316,7 +316,7 @@ func (b *scopeBuffer) updateByUUID(uuid string, payload json.RawMessage, preRend
 // Returns *StoreFullError on cap reservation failure; scope state is
 // untouched in that case (no Seq increment, no b.items mutation, no
 // b.bytes increment), so the caller returns without rollback.
-func (b *scopeBuffer) insertNewItemLocked(item Item, nowUs int64, mintedUUID string) (Item, error) {
+func (b *scopeBuffer) insertNewItemLocked(item Item, nowUs int64, mintedUUID UUID) (Item, error) {
 	// Defensive clear of counter — Gateway boundary already strips it,
 	// HTTP json-decode never sets it, but internal callers (helpers,
 	// direct-construction tests) might. A leaked non-nil counter
@@ -334,7 +334,7 @@ func (b *scopeBuffer) insertNewItemLocked(item Item, nowUs int64, mintedUUID str
 	// Adopt the caller's pre-minted uuid. The b.store read is under
 	// b.mu (safe against a concurrent detach); the expensive mint
 	// already happened in the caller, off-lock.
-	if b.store != nil && item.UUID == "" {
+	if b.store != nil && item.UUID.IsZero() {
 		item.UUID = mintedUUID
 	}
 
@@ -378,12 +378,12 @@ func (b *scopeBuffer) insertNewItemLocked(item Item, nowUs int64, mintedUUID str
 		b.byID[item.ID] = stored
 		b.idKeyBytes += int64(len(item.ID))
 	}
-	if item.UUID != "" {
+	if !item.UUID.IsZero() {
 		if b.byUUID == nil {
-			b.byUUID = make(map[string]*Item)
+			b.byUUID = make(map[UUID]*Item)
 		}
 		b.byUUID[item.UUID] = stored
-		if b.firstUUID == "" {
+		if b.firstUUID.IsZero() {
 			b.firstUUID = item.UUID
 		}
 		b.lastUUID = item.UUID

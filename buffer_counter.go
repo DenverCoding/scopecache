@@ -260,12 +260,12 @@ func (b *scopeBuffer) counterAddSlow(scope, id string, by int64) (int64, bool, e
 	}
 	b.byID[id] = stored
 	b.idKeyBytes += int64(len(id))
-	if item.UUID != "" {
+	if !item.UUID.IsZero() {
 		if b.byUUID == nil {
-			b.byUUID = make(map[string]*Item)
+			b.byUUID = make(map[UUID]*Item)
 		}
 		b.byUUID[item.UUID] = stored
-		if b.firstUUID == "" {
+		if b.firstUUID.IsZero() {
 			b.firstUUID = item.UUID
 		}
 		b.lastUUID = item.UUID
