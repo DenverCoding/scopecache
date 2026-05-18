@@ -28,6 +28,14 @@ import (
 )
 
 func (b *scopeBuffer) appendItem(item Item) (Item, error) {
+	// Mint the uuid BEFORE taking b.mu. newUUIDv7 is a pure function,
+	// and keeping it off the scope's contended critical section is what
+	// makes its cost invisible under append-same. Whether the item
+	// actually adopts it is decided under b.mu by insertNewItemLocked
+	// (orphan store-less buffers skip it); reading b.store out here
+	// would race a concurrent detach.
+	mintedUUID := newUUIDv7()
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -45,7 +53,7 @@ func (b *scopeBuffer) appendItem(item Item) (Item, error) {
 		}
 	}
 
-	return b.insertNewItemLocked(item, time.Now().UnixMicro())
+	return b.insertNewItemLocked(item, time.Now().UnixMicro(), mintedUUID)
 }
 
 // upsertByID replaces the payload of the item with this id if it exists,
@@ -55,6 +63,12 @@ func (b *scopeBuffer) appendItem(item Item) (Item, error) {
 // cursor for consumers) and freshly assigned on create (matches /append).
 // Returns the final item and whether a new item was created.
 func (b *scopeBuffer) upsertByID(item Item) (Item, bool, error) {
+	// Pre-mint outside b.mu (see appendItem). The replace branch
+	// discards it (the existing item keeps its uuid); the miss branch
+	// hands it to insertNewItemLocked. A harmless wasted mint on
+	// replace, cheaper than lengthening the b.mu section.
+	mintedUUID := newUUIDv7()
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -111,7 +125,7 @@ func (b *scopeBuffer) upsertByID(item Item) (Item, bool, error) {
 
 	// Reuse the replace branch's nowUs so create-vs-replace is
 	// indistinguishable in Ts to observers.
-	inserted, err := b.insertNewItemLocked(item, nowUs)
+	inserted, err := b.insertNewItemLocked(item, nowUs, mintedUUID)
 	if err != nil {
 		return Item{}, false, err
 	}
@@ -279,9 +293,9 @@ func (b *scopeBuffer) updateByUUID(uuid string, payload json.RawMessage, preRend
 // insertNewItemLocked is the shared fresh-insert pipeline used by
 // appendItem and upsertByID's miss-branch. Pipeline order is
 // intentional and must stay coherent across both paths:
-// ts-stamp → renderBytes precompute → uuid-mint → size → store-byte
-// reservation → seq assignment → b.items append → b.bySeq sync →
-// b.byID sync (when ID != "") → b.byUUID sync → b.bytes update.
+// ts-stamp → renderBytes precompute → size → store-byte reservation
+// → seq assignment → b.items append → b.bySeq sync → b.byID sync
+// (when ID != "") → b.byUUID sync → b.bytes update.
 //
 // PRECONDITIONS — caller responsibilities, not re-checked:
 //   - holds b.mu (write lock)
@@ -290,6 +304,11 @@ func (b *scopeBuffer) updateByUUID(uuid string, payload json.RawMessage, preRend
 //   - duplicate-ID ruled out (when item.ID != "")
 //   - client-supplied Seq/Ts already rejected at the validator
 //
+// mintedUUID is the caller's pre-minted UUIDv7 (appendItem / upsertByID
+// call newUUIDv7 OUTSIDE b.mu so the mint cost stays off the scope's
+// contended critical section). It is adopted only when the buffer is
+// store-attached; an orphan store-less buffer leaves item.UUID empty.
+//
 // nowUs is caller-supplied so /upsert keeps create- and replace-
 // paths on identical Ts (observers cannot infer create-vs-replace
 // from timestamp drift). /append computes its own at the call site.
@@ -297,7 +316,7 @@ func (b *scopeBuffer) updateByUUID(uuid string, payload json.RawMessage, preRend
 // Returns *StoreFullError on cap reservation failure; scope state is
 // untouched in that case (no Seq increment, no b.items mutation, no
 // b.bytes increment), so the caller returns without rollback.
-func (b *scopeBuffer) insertNewItemLocked(item Item, nowUs int64) (Item, error) {
+func (b *scopeBuffer) insertNewItemLocked(item Item, nowUs int64, mintedUUID string) (Item, error) {
 	// Defensive clear of counter — Gateway boundary already strips it,
 	// HTTP json-decode never sets it, but internal callers (helpers,
 	// direct-construction tests) might. A leaked non-nil counter
@@ -312,13 +331,11 @@ func (b *scopeBuffer) insertNewItemLocked(item Item, nowUs int64) (Item, error) 
 	if item.renderBytes == nil {
 		item.renderBytes = precomputeRenderBytes(item.Payload)
 	}
-	// Mint the cache-owned UUIDv7 before approxItemSize so its 36
-	// bytes are admitted against the cap. newUUIDv7 is a pure function
-	// (uuid.go) — no shared state, fine to call under b.mu. An orphan
-	// buffer (store == nil, unit tests) skips minting so its items
-	// match the no-store byte accounting those tests assert.
+	// Adopt the caller's pre-minted uuid. The b.store read is under
+	// b.mu (safe against a concurrent detach); the expensive mint
+	// already happened in the caller, off-lock.
 	if b.store != nil && item.UUID == "" {
-		item.UUID = newUUIDv7()
+		item.UUID = mintedUUID
 	}
 
 	size := approxItemSize(item)

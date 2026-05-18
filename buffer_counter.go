@@ -126,6 +126,11 @@ func atomicCounterAdd(cell *counterCell, by int64) (int64, error) {
 // accounting; the cost is amortised across the counter's lifetime
 // because subsequent increments hit the fast path.
 func (b *scopeBuffer) counterAddSlow(scope, id string, by int64) (int64, bool, error) {
+	// Pre-mint outside b.mu (see appendItem). Adopted by the create
+	// branch below under b.mu; the promote / found-cell branches
+	// discard it. Reading b.store out here would race a detach.
+	mintedUUID := newUUIDv7()
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -223,10 +228,11 @@ func (b *scopeBuffer) counterAddSlow(scope, id string, by int64) (int64, bool, e
 		Ts:      nowUs,
 		counter: cell,
 	}
-	// Mint the cache-owned UUIDv7 before approxItemSize, same as
-	// insertNewItemLocked. newUUIDv7 is a pure function (uuid.go).
+	// Adopt the pre-minted uuid (b.store read is under b.mu here). An
+	// orphan store-less buffer skips it, matching the no-store byte
+	// accounting the unit tests assert.
 	if b.store != nil {
-		item.UUID = newUUIDv7()
+		item.UUID = mintedUUID
 	}
 	// approxItemSize sees item.counter != nil and charges
 	// counterCellOverhead instead of len(Payload). No
