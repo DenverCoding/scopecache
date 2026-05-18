@@ -2,6 +2,7 @@ package scopecache
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -58,8 +59,15 @@ func TestWarm_RejectsNonV7UUID(t *testing.T) {
 	h, _ := newTestHandler(100)
 	// version 4, not 7.
 	body := `{"items":[{"scope":"s","id":"a","uuid":"01234567-89ab-4cde-8f01-23456789abcd","payload":{"v":1}}]}`
-	if code, _, _ := doAdminRequest(t, h, "/warm", body); code != 400 {
+	code, out, _ := doAdminRequest(t, h, "/warm", body)
+	if code != 400 {
 		t.Fatalf("warm with a non-v7 uuid: code=%d want 400", code)
+	}
+	// The malformed uuid is rejected at decode time (UUID.UnmarshalJSON);
+	// decodeBody must surface the uuid-specific message, not the generic
+	// "must contain valid JSON" — the body IS valid JSON.
+	if msg, _ := out["error"].(string); !strings.Contains(msg, "UUIDv7") {
+		t.Fatalf("error should name the uuid problem, got: %q", msg)
 	}
 }
 

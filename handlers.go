@@ -88,9 +88,13 @@ func writeMutationError(w http.ResponseWriter, err error, scopeForSFE string) {
 // decodeBody caps the request body at max bytes and decodes JSON into out.
 // The MaxBytesReader guard runs at read time, so it protects against clients
 // that omit Content-Length or stream chunked bodies just as much as sized ones.
-// An exceeded-cap error is distinguished from a plain JSON syntax error so
-// callers can return a meaningful message. A second Decode is used to reject
-// trailing content (a second object or garbage after the first value), which
+//
+// Three error shapes are distinguished so the caller's 400 is meaningful:
+// an exceeded-cap error, a field-level rejection that surfaces a known
+// sentinel (errInvalidUUIDv7 — a structurally valid JSON body whose `uuid`
+// value failed UUID.UnmarshalJSON, e.g. a non-v7 uuid in a /warm batch), and
+// a plain JSON syntax error. A second Decode is used to reject trailing
+// content (a second object or garbage after the first value), which
 // json.Decoder would otherwise silently ignore.
 func decodeBody(w http.ResponseWriter, r *http.Request, max int64, out interface{}) error {
 	r.Body = http.MaxBytesReader(w, r.Body, max)
@@ -100,6 +104,9 @@ func decodeBody(w http.ResponseWriter, r *http.Request, max int64, out interface
 		if errors.As(err, &mbe) {
 			return errors.New("the request body exceeds the maximum allowed size of " +
 				strconv.FormatInt(mbe.Limit, 10) + " bytes")
+		}
+		if errors.Is(err, errInvalidUUIDv7) {
+			return errInvalidUUIDv7
 		}
 		return errors.New("the request body must contain valid JSON")
 	}
