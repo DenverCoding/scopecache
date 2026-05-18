@@ -810,7 +810,7 @@ Validation rules for the fields that appear across the API:
 | `payload`   | any JSON value  | required; must be syntactically valid JSON; literal `null` is rejected; bytes are opaque to the cache |
 | `seq`       | uint64          | cache-assigned; clients must omit on every write; reads + `/update` // `/delete` accept it as an addressing key |
 | `ts`        | int64           | cache-assigned; clients must omit on every write |
-| `uuid`      | string (v7)     | cache-owned; clients must omit on `/append`, `/upsert`, `/counter_add`; `/warm` // `/rebuild` adopt a supplied value but it must be a canonical UUIDv7; reads + `/update` // `/delete` accept it as an addressing key |
+| `uuid`      | string (v7)     | cache-owned; clients must omit on `/append`, `/upsert`, `/counter_add`; `/warm` // `/rebuild` adopt a supplied value but it must be a canonical lowercase UUIDv7; reads + `/update` // `/delete` accept it as an addressing key |
 | `by`        | int64           | required for `/counter_add`; non-zero; within ±(2^53 − 1) |
 | `max_seq`   | uint64          | for `/delete_up_to`; exactly one of `max_seq` or `uuid` (the boundary), `max_seq` must be > 0 |
 
@@ -1700,7 +1700,7 @@ cursor-based forward paging (stable under `/delete_up_to`), or
   "hit": true,
   "count": 10,
   "truncated": false,
-  "items": [{"scope":"events","id":"e1","seq":1,"ts":...,"payload":{"v":1}}, ...],
+  "items": [{"scope":"events","id":"e1","seq":1,"ts":1700000000000000,"uuid":"0192f3a0-6e1c-7c8a-b3d4-1f2e3a4b5c6d","payload":{"v":1}}, ...],
   "approx_response_mb": 0.0042
 }
 ```
